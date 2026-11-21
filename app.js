@@ -8,7 +8,8 @@ const DEFAULT_STATE = {
   msgs: [],    // повідомлення: {id, channel, kind, from, contact, text, status, date, due}
   tasks: [],   // справи: {id, title, date, time, priority, done, note, doneAt}
   leads: [],   // ліди: {id, name, contact, request, source, status, amount, date, next, note}
-  settings: { currency: '₴', tgToken: '', tgOffset: 0 }
+  settings: { currency: '₴', tgToken: '', tgOffset: 0 },
+  notified: {} // ключі нагадувань, які вже спрацювали
 };
 
 function loadState() {
@@ -510,8 +511,9 @@ function taskHtml(x) {
     <button class="check ${x.done ? 'on' : ''}" data-check="${x.id}" aria-label="Виконано">${x.done ? '✓' : ''}</button>
     <div class="main" data-task="${x.id}">
       <div class="title">${esc(x.title)}</div>
-      ${(x.time || x.note || overdue || x.priority === 'high') ? `<div class="sub">
+      ${(x.time || x.note || overdue || x.priority === 'high' || remindAt(x)) ? `<div class="sub">
         ${x.time ? `<span>🕒 ${esc(x.time)}</span>` : ''}
+        ${remindAt(x) ? `<span class="pill">🔔 ${x.snoozeUntil ? 'відкладено до ' + fmtClock(remindAt(x)) : (x.date === today() || x.remind === '1440' ? fmtClock(remindAt(x)) : REMIND[x.remind])}</span>` : ''}
         ${overdue ? `<span class="pill red">прострочено · ${fmtDate(x.date)}</span>` : ''}
         ${x.priority === 'high' ? '<span class="pill red">важливо</span>' : ''}
         ${x.note ? `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%">${esc(x.note)}</span>` : ''}
@@ -524,6 +526,7 @@ function toggleTask(id) {
   const x = state.tasks.find((t) => t.id === id); if (!x) return;
   x.done = !x.done;
   x.doneAt = x.done ? new Date().toISOString() : null;
+  x.snoozeUntil = null;
   save(); render();
   if (x.done && navigator.vibrate) navigator.vibrate(15);
 }
@@ -540,6 +543,7 @@ function renderTasks(v) {
     const done = list.filter((x) => x.done).length;
     const overdue = ui.taskDate === t ? state.tasks.filter((x) => !x.done && x.date < t).sort((a, b) => a.date.localeCompare(b.date)) : [];
     head += navRow(`${d.getDate()} ${MONTHS_GEN[d.getMonth()]}`, ui.taskDate === t ? 'сьогодні' : DOW_FULL[d.getDay()]);
+    head += remindersBlock();
     body = `
       <div class="card"><div class="progress-row"><span>Виконано ${done} з ${list.length}</span><span>${list.length ? Math.round(done / list.length * 100) : 0}%</span></div>
       <div class="progress"><div style="width:${list.length ? done / list.length * 100 : 0}%"></div></div></div>
@@ -609,8 +613,21 @@ function renderTasks(v) {
     state.tasks.forEach((x) => { if (!x.done && x.date === ui.taskDate) x.date = tomorrow; });
     save(); render(); toast('Перенесено на завтра');
   });
+  v.querySelectorAll('[data-notify]').forEach((b) => b.addEventListener('click', askNotifyPermission));
   bindCommon(v);
   const tc = $('#todayCol', v); if (tc) $('#board', v).scrollLeft = tc.offsetLeft - 16;
+}
+
+function remindersBlock() {
+  const hasAny = state.tasks.some((x) => remindAt(x));
+  const perm = 'Notification' in window ? Notification.permission : 'unsupported';
+  let html = '';
+  if (hasAny && perm === 'default') html += `<div class="card" style="display:flex;gap:10px;align-items:center"><div style="flex:1">🔔 Дозвольте сповіщення, щоб отримувати нагадування про справи</div><button class="btn small" data-notify>Увімкнути</button></div>`;
+  if (hasAny && perm === 'denied') html += '<p class="hint" style="color:var(--red)">Сповіщення заблоковані в налаштуваннях браузера — нагадування показуватимуться лише у відкритому додатку.</p>';
+  const up = upcomingReminders(24);
+  if (up.length) html += `<div class="card"><h3>🔔 Найближчі нагадування</h3>${up.slice(0, 5).map(({ t, at }) =>
+    `<div class="progress-row" style="margin:6px 0;cursor:pointer" data-task="${t.id}"><span style="color:var(--text)">${esc(t.title)}</span><b>${at.toDateString() === new Date().toDateString() ? '' : fmtDate(toISO(at)) + ' '}${fmtClock(at)}</b></div>`).join('')}</div>`;
+  return html;
 }
 
 function navRow(title, sub) {
@@ -619,6 +636,120 @@ function navRow(title, sub) {
     <div class="period" data-today style="cursor:pointer">${title}<small>${sub}</small></div>
     <button class="navbtn" data-nav="1">›</button>
   </div>`;
+}
+
+const REMIND = { '': 'Без нагадування', 0: 'У момент справи', 5: 'За 5 хвилин', 15: 'За 15 хвилин', 30: 'За 30 хвилин', 60: 'За 1 годину', 120: 'За 2 години', 1440: 'За 1 день' };
+
+/* ---------- Нагадування для справ ---------- */
+function remindAt(t) {
+  if (t.remind === '' || t.remind == null || t.done) return null;
+  const [h, m] = (t.time || '09:00').split(':').map(Number);
+  const d = fromISO(t.date); d.setHours(h, m, 0, 0);
+  if (t.snoozeUntil) return new Date(t.snoozeUntil);
+  return new Date(d.getTime() - Number(t.remind) * 60000);
+}
+const remindKey = (t, at) => `${t.id}@${at.getTime()}`;
+const fmtClock = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+function upcomingReminders(hours = 24) {
+  const now = Date.now(), until = now + hours * 3600000;
+  return state.tasks.map((t) => ({ t, at: remindAt(t) }))
+    .filter((r) => r.at && r.at.getTime() >= now && r.at.getTime() <= until)
+    .sort((a, b) => a.at - b.at);
+}
+
+async function askNotifyPermission() {
+  if (!('Notification' in window)) return false;
+  if (Notification.permission === 'granted') return true;
+  if (Notification.permission === 'denied') return false;
+  const r = await Notification.requestPermission();
+  if (r === 'granted') toast('🔔 Сповіщення увімкнено');
+  render();
+  return r === 'granted';
+}
+
+async function notify(title, body, tag) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const opts = { body, tag, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', vibrate: [200, 100, 200], requireInteraction: true, data: { tab: 'tasks' } };
+  try {
+    const reg = 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration() : null;
+    if (reg) { await reg.showNotification(title, opts); return; }
+  } catch (e) { /* fallback нижче */ }
+  try { new Notification(title, opts); } catch (e) { /* ignore */ }
+}
+
+function checkReminders() {
+  const now = Date.now();
+  const due = [];
+  for (const t of state.tasks) {
+    const at = remindAt(t);
+    if (!at) continue;
+    const key = remindKey(t, at);
+    // спрацьовує, якщо час настав, але не пізніше ніж 12 год тому
+    if (at.getTime() <= now && at.getTime() > now - 12 * 3600000 && !state.notified[key]) {
+      state.notified[key] = now;
+      due.push(t);
+    }
+  }
+  // прибираємо старі записи
+  for (const [k, v] of Object.entries(state.notified)) if (v < now - 7 * 86400000) delete state.notified[k];
+  if (!due.length) return;
+  save();
+  due.forEach((t) => notify(`🔔 ${t.title}`, `${t.time ? 'О ' + t.time + ' · ' : ''}${fmtDate(t.date)}${t.note ? '\n' + t.note : ''}`, 'task-' + t.id));
+  if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  showReminderSheet(due);
+}
+
+function showReminderSheet(list) {
+  if (!$('#sheetBackdrop').hidden) return; // не перебиваємо відкриту форму — є системне сповіщення
+  openSheet(`
+    <h2>🔔 Нагадування</h2>
+    ${list.map((t) => `<div class="card" style="box-shadow:none;background:var(--bg)">
+      <div style="font-weight:700;font-size:17px">${esc(t.title)}</div>
+      <div class="hint" style="margin:4px 0 10px">${t.time ? '🕒 ' + esc(t.time) + ' · ' : ''}${fmtDate(t.date)}${t.note ? '<br>' + esc(t.note) : ''}</div>
+      <div class="btn-row">
+        <button class="btn small" data-rdone="${t.id}">✓ Виконано</button>
+        <button class="btn small secondary" data-rsnooze="${t.id}" data-min="10">+10 хв</button>
+        <button class="btn small secondary" data-rsnooze="${t.id}" data-min="60">+1 год</button>
+      </div></div>`).join('')}
+    <button class="btn secondary" id="rClose">Закрити</button>
+  `, (root) => {
+    const finish = (id) => { const c = root.querySelector(`[data-rdone="${id}"]`)?.closest('.card'); if (c) c.remove(); if (!root.querySelector('.card')) closeSheet(); };
+    root.querySelectorAll('[data-rdone]').forEach((b) => b.addEventListener('click', () => {
+      const t = state.tasks.find((x) => x.id === b.dataset.rdone);
+      if (t) { t.done = true; t.doneAt = new Date().toISOString(); t.snoozeUntil = null; save(); render(); }
+      finish(b.dataset.rdone);
+    }));
+    root.querySelectorAll('[data-rsnooze]').forEach((b) => b.addEventListener('click', () => {
+      const t = state.tasks.find((x) => x.id === b.dataset.rsnooze);
+      if (t) { t.snoozeUntil = Date.now() + Number(b.dataset.min) * 60000; save(); render(); toast(`Нагадаю о ${fmtClock(new Date(t.snoozeUntil))}`); }
+      finish(b.dataset.rsnooze);
+    }));
+    $('#rClose', root).addEventListener('click', closeSheet);
+  });
+}
+
+/* Файл .ics — подія з будильником у системному календарі (спрацює, навіть коли додаток закрито) */
+function downloadIcs(t) {
+  const [h, m] = (t.time || '09:00').split(':').map(Number);
+  const start = fromISO(t.date); start.setHours(h, m, 0, 0);
+  const end = new Date(start.getTime() + 30 * 60000);
+  const f = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
+  const txt = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/[,;]/g, (c) => '\\' + c).replace(/\n/g, '\\n');
+  const mins = t.remind === '' || t.remind == null ? 15 : Number(t.remind);
+  const ics = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//MiniCRM//UK', 'CALSCALE:GREGORIAN', 'BEGIN:VEVENT',
+    `UID:${t.id}@minicrm`, `DTSTAMP:${f(new Date())}`, `DTSTART:${f(start)}`, `DTEND:${f(end)}`,
+    `SUMMARY:${txt(t.title)}`, t.note ? `DESCRIPTION:${txt(t.note)}` : '',
+    'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${txt(t.title)}`, `TRIGGER:-PT${mins}M`, 'END:VALARM',
+    'END:VEVENT', 'END:VCALENDAR'
+  ].filter(Boolean).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([ics], { type: 'text/calendar;charset=utf-8' }));
+  a.download = `${t.title.slice(0, 40).replace(/[^\p{L}\d ]/gu, '') || 'sprava'}.ics`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast('Відкрийте файл, щоб додати в календар');
 }
 
 const REPEAT = { none: 'Не повторювати', daily: 'Щодня (7 днів)', weekdays: 'Будні (2 тижні)', weekly: 'Щотижня (4 тижні)' };
@@ -631,14 +762,30 @@ function editTask(x, preset = {}) {
     { name: 'date', label: 'Дата', type: 'date', required: true, half: true },
     { name: 'time', label: 'Час', type: 'time', half: true },
     { name: 'priority', label: 'Пріоритет', type: 'toggle', options: { low: 'Звичайний', mid: 'Середній', high: 'Високий' } },
+    { name: 'remind', label: '🔔 Нагадати', type: 'select', options: REMIND },
     { name: 'note', label: 'Нотатки', type: 'textarea' }
   ];
   if (isNew) fields.push({ name: 'repeat', label: 'Повторення', type: 'select', options: REPEAT });
+  fields._onMount = (root) => {
+    const hint = $('#remindHint', root);
+    const upd = () => {
+      const r = root.querySelector('[name=remind]').value;
+      const t = root.querySelector('[name=time]').value;
+      hint.textContent = r !== '' && !t ? 'Час не вказано — нагадування спрацює о 09:00.' : '';
+    };
+    root.querySelectorAll('[name=remind],[name=time]').forEach((el) => el.addEventListener('change', upd));
+    upd();
+    const cal = $('#icsBtn', root);
+    if (cal) cal.addEventListener('click', () => downloadIcs(x));
+  };
   openForm({
     title: isNew ? 'Нова справа' : 'Справа',
     fields, values: x,
+    extraHtml: `<p class="hint" id="remindHint"></p>${isNew ? '' : '<button type="button" class="btn secondary" id="icsBtn">📅 Додати в календар телефону</button>'}`,
     onSave: (d) => {
       const rep = d.repeat; delete d.repeat;
+      if (d.remind !== '') askNotifyPermission();
+      d.snoozeUntil = null;
       if (!isNew) { Object.assign(x, d); toast('Збережено'); return; }
       const dates = [d.date];
       if (rep === 'daily') for (let i = 1; i < 7; i++) dates.push(addDays(d.date, i));
@@ -854,10 +1001,10 @@ function fillDemo() {
     { id: uid(), channel: 'email', kind: 'personal', from: 'Бухгалтерія', contact: 'buh@example.com', text: 'Надішліть, будь ласка, акт виконаних робіт за місяць.', status: 'wait', date: at(-2, '11:05'), due: at(1, '12:00') }
   );
   state.tasks.push(
-    { id: uid(), title: 'Передзвонити Олені', date: t, time: '11:00', priority: 'high', done: false, note: '' },
+    { id: uid(), title: 'Передзвонити Олені', date: t, time: '11:00', priority: 'high', done: false, note: '', remind: '15' },
     { id: uid(), title: 'Підготувати комерційну пропозицію', date: t, time: '14:00', priority: 'mid', done: false, note: 'Для Андрія' },
     { id: uid(), title: 'Сплатити інтернет', date: t, time: '', priority: 'low', done: true, note: '' },
-    { id: uid(), title: 'Зустріч з клієнтом', date: addDays(t, 1), time: '10:30', priority: 'high', done: false, note: '' },
+    { id: uid(), title: 'Зустріч з клієнтом', date: addDays(t, 1), time: '10:30', priority: 'high', done: false, note: '', remind: '60' },
     { id: uid(), title: 'Пост в Instagram', date: addDays(t, 2), time: '', priority: 'low', done: false, note: '' },
     { id: uid(), title: 'Надіслати акт бухгалтерії', date: addDays(t, -1), time: '', priority: 'mid', done: false, note: '' }
   );
@@ -881,6 +1028,11 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet
 
 updateBadges();
 go('home');
+if (!state.notified) state.notified = {};
+checkReminders();
+setInterval(checkReminders, 20000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { checkReminders(); render(); } });
+if (new URLSearchParams(location.search).get('tab') === 'tasks') go('tasks');
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

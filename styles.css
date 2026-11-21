@@ -258,3 +258,4 @@ button { cursor: pointer; }
 }
 .toast[hidden] { display: none; }
 .item .sub.tags { white-space: normal; display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.badge[hidden] { display: none; }
