@@ -10,7 +10,8 @@ cp index.html styles.css app.js manifest.json "$TMP/"
 mkdir -p "$TMP/icons" && cp icons/* "$TMP/icons/"
 # нова версія кешу service worker при кожному розгортанні
 sed "s/const CACHE = 'minicrm-v[^']*';/const CACHE = 'minicrm-$VERSION';/" sw.js > "$TMP/sw.js"
-SITE=$(tar -C "$TMP" -czf - . | base64 -w 0)
+chmod -R u=rwX,go=rX "$TMP"
+SITE=$(tar -C "$TMP" --owner=0 --group=0 --numeric-owner -czf - . | base64 -w 0)
 rm -rf "$TMP"
 {
 cat <<YAML
@@ -21,7 +22,7 @@ services:
     container_name: minicrm
     restart: unless-stopped
     entrypoint: ["/bin/sh", "-c"]
-    command: ["rm -rf /usr/share/nginx/html/* && base64 -d /site.b64 | tar -xz -C /usr/share/nginx/html && exec nginx -g 'daemon off;'"]
+    command: ["rm -rf /usr/share/nginx/html/* && base64 -d /site.b64 | tar -xzo -C /usr/share/nginx/html && chmod -R a+rX /usr/share/nginx/html && exec nginx -g 'daemon off;'"]
     configs:
       - source: site
         target: /site.b64
