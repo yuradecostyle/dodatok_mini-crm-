@@ -36,6 +36,25 @@ Android або iPhone, працює офлайн і не потребує збі
 - Коли додаток повністю закритий, браузер не може сам запустити нагадування. Для таких справ натисніть у справі **«📅 Додати в календар телефону»**: подія з будильником збережеться в Google Календар або Календар iPhone і спрацює завжди.
 - На iPhone сповіщення працюють лише тоді, коли додаток встановлено на екран «Додому» (iOS 16.4 або новіша).
 
+## Сервер (Hostinger VPS, Docker)
+
+Додаток працює на VPS у Docker-проєкті **`minicrm`** (nginx). Адреса: **https://1.decostyle.com.ua**.
+
+- `deploy/make-compose.sh` збирає `deploy/compose.yaml`. Усі файли додатку вбудовуються в compose-файл, а кеш service worker отримує нову версію.
+- Контейнер `minicrm` підключений до мережі `marta_school_default`. Через неї спільний Caddy (проєкт `marta_school`) проксує домен і сам видає HTTPS-сертифікат.
+- Оновлення: `sh deploy/make-compose.sh`, потім коміт і пуш. Далі створити Docker-проєкт `minicrm` з URL
+  `https://raw.githubusercontent.com/yuradecostyle/dodatok_mini-crm-/claude/practical-ramanujan-8qphvx/deploy/compose.yaml`
+  (проєкт з тим самим імʼям замінюється).
+
+Одноразове налаштування домену в Caddyfile (`/opt/marta-school/Caddyfile`):
+
+```
+1.decostyle.com.ua {
+	encode zstd gzip
+	reverse_proxy minicrm:80
+}
+```
+
 ## Структура
 
 ```
