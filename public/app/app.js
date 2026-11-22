@@ -118,7 +118,7 @@ async function api(method, url, body) {
   return data;
 }
 
-let S = { sources: [], leads: [], projects: [], tasks: [], settlements: [], utilities: [], transactions: [] };
+let S = { counterparties: [], sources: [], leads: [], projects: [], tasks: [], settlements: [], utilities: [], transactions: [] };
 async function refresh() { S = await api('GET', '/api/state'); render(); }
 async function create(res, data, { reload = false } = {}) {
   const it = await api('POST', `/api/${res}`, data);
@@ -299,7 +299,8 @@ function openForm(opts) {
     } else {
       const num = f.type === 'number' ? 'inputmode="decimal" step="any"' : '';
       input = `<input type="${f.type || 'text'}" name="${f.name}" value="${esc(v)}" ${num} placeholder="${esc(f.placeholder || '')}" ${f.list ? `list="dl-${f.name}"` : ''} autocomplete="off">` +
-        (f.list ? `<datalist id="dl-${f.name}">${f.list.map((x) => `<option value="${esc(x)}">`).join('')}</datalist>` : '');
+        (f.list ? `<datalist id="dl-${f.name}">${f.list.map((x) => `<option value="${esc(x)}">`).join('')}</datalist>` : '') +
+        (f.party ? `<div class="sugg hidden" data-sugg="${f.name}"></div>` : '');
     }
     if (f.mic) input = `<div class="with-mic">${input}<button type="button" class="mic" data-mic-for="${f.name}" aria-label="Надиктувати">🎤</button></div>`;
     return `<div class="f" data-field="${f.name}"><label>${esc(f.label)}</label>${input}${f.after || ''}</div>`;
@@ -339,6 +340,7 @@ function openForm(opts) {
     });
     if (onDelete) $('#sfDel', root).addEventListener('click', async () => { if (confirm('Видалити?')) { try { await onDelete(); } catch { return; } back(); toast('Видалено'); } });
     saved = read;
+    $$('[data-sugg]', root).forEach((box) => bindPartySuggest(root.querySelector(`input[name="${box.dataset.sugg}"]`), box));
     $$('[data-mic-for]', root).forEach((b) => b.addEventListener('click', () => {
       const el = root.querySelector(`[name="${b.dataset.micFor}"]`);
       dictate(el, b, { append: el.tagName === 'TEXTAREA', onFinal: (text) => opts.onVoice?.(text, root, b.dataset.micFor) });
@@ -358,10 +360,42 @@ function settlementPaid(s) { return sum(S.transactions.filter((t) => t.settlemen
 function outstanding(dir) {
   return sum(S.settlements.filter((s) => s.direction === dir && !s.closed).map((s) => Math.max(0, s.amount - settlementPaid(s))));
 }
-const counterparties = (dir) => [...new Set([
-  ...S.settlements.filter((s) => !dir || s.direction === dir).map((s) => s.counterparty),
-  ...S.transactions.filter((t) => t.counterparty && (!dir || (dir === 'payable' ? t.type === 'expense' : t.type === 'income'))).map((t) => t.counterparty)
-])].filter(Boolean).sort();
+const PARTY = {
+  supplier: { label: 'Постачальник', icon: '📦' },
+  client: { label: 'Клієнт', icon: '🤝' },
+  investor: { label: 'Інвестор', icon: '📈' },
+  other: { label: 'Інше', icon: '👤' }
+};
+const findParty = (name) => { const q = String(name || '').trim().toLowerCase(); return q ? S.counterparties.find((c) => c.name.trim().toLowerCase() === q) : null; };
+/** Новий контрагент автоматично зберігається в довідник. */
+async function ensureParty(name, type) {
+  const n = String(name || '').trim();
+  if (!n || findParty(n)) return;
+  const it = await api('POST', '/api/counterparties', { name: n, type });
+  S.counterparties.push(it);
+  S.counterparties.sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+}
+/** Підказки з довідника під полем вводу контрагента. */
+function bindPartySuggest(inp, box) {
+  if (!inp) return;
+  const show = () => {
+    const q = inp.value.trim().toLowerCase();
+    const items = S.counterparties.filter((c) => !q || c.name.toLowerCase().includes(q) || (c.phone || '').replace(/\s/g, '').includes(q.replace(/\s/g, ''))).slice(0, 6);
+    const isNew = q && !findParty(q);
+    box.innerHTML = items.map((c) => `<button type="button" data-pick="${esc(c.name)}"><span>${(PARTY[c.type] || PARTY.other).icon} ${esc(c.name)}</span><small>${(PARTY[c.type] || PARTY.other).label}${c.phone ? ' · ' + esc(c.phone) : ''}</small></button>`).join('') +
+      (isNew ? `<div class="sugg-new">＋ «${esc(inp.value.trim())}» буде збережено в довідник</div>` : '');
+    box.classList.toggle('hidden', !box.innerHTML);
+  };
+  inp.addEventListener('focus', show);
+  inp.addEventListener('input', show);
+  inp.addEventListener('blur', () => setTimeout(() => box.classList.add('hidden'), 200));
+  box.addEventListener('pointerdown', (e) => e.preventDefault());
+  box.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-pick]'); if (!b) return;
+    inp.value = b.dataset.pick; box.classList.add('hidden');
+    inp.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+}
 const investors = () => [...new Set(S.transactions.filter((t) => t.kind === 'investment' && t.counterparty).map((t) => t.counterparty))].sort();
 const projOptions = () => ({ '': '— без проєкту —', ...Object.fromEntries(S.projects.filter((p) => p.status !== 'done' || true).map((p) => [p.id, `${p.emoji || '📁'} ${p.name}`])) });
 const taskSort = (a, b) => (a.done - b.done) || ((a.time || '99').localeCompare(b.time || '99')) || ({ high: 0, mid: 1, low: 2 }[a.priority] - { high: 0, mid: 1, low: 2 }[b.priority]) || (a.position - b.position) || (a.id - b.id);
@@ -421,12 +455,12 @@ function renderHome(v) {
 }
 
 /* ================= ФІНАНСИ ================= */
-const FIN_SUBS = [['ops', 'Операції'], ['report', 'Звіт'], ['utilities', 'Комуналка'], ['settlements', 'Розрахунки'], ['invest', 'Інвестиції']];
+const FIN_SUBS = [['ops', 'Операції'], ['report', 'Звіт'], ['utilities', 'Комуналка'], ['settlements', 'Розрахунки'], ['invest', 'Інвестиції'], ['parties', 'Контрагенти']];
 function renderFinance(v) {
   if (!FIN_SUBS.some(([k]) => k === ui.sub)) ui.sub = 'ops';
   ls.set('sub', ui.sub);
   const seg = `<div class="seg">${FIN_SUBS.map(([k, l]) => `<button data-sub="${k}" class="${ui.sub === k ? 'active' : ''}">${l}</button>`).join('')}</div>`;
-  const body = { ops: finOps, report: finReport, utilities: finUtilities, settlements: finSettlements, invest: finInvest }[ui.sub]();
+  const body = { ops: finOps, report: finReport, utilities: finUtilities, settlements: finSettlements, invest: finInvest, parties: finParties }[ui.sub]();
   v.innerHTML = seg + body;
   $$('[data-sub]', v).forEach((b) => b.addEventListener('click', () => { ui.sub = b.dataset.sub; render(); }));
   $$('[data-nav]', v).forEach((b) => b.addEventListener('click', () => {
@@ -445,6 +479,10 @@ function renderFinance(v) {
   $$('[data-dir]', v).forEach((b) => b.addEventListener('click', () => { ui.setDir = b.dataset.dir; render(); }));
   $('#showClosed', v)?.addEventListener('click', () => { ui.showClosed = !ui.showClosed; render(); });
   $('#copyUtil', v)?.addEventListener('click', copyUtilities);
+  $$('[data-pt]', v).forEach((b) => b.addEventListener('click', () => { ui.partyType = b.dataset.pt; render(); }));
+  $$('[data-party]', v).forEach((el) => el.addEventListener('click', () => showParty(byId('counterparties', el.dataset.party))));
+  const pq = $('#partyQ', v);
+  pq?.addEventListener('input', () => { ui.partyQuery = pq.value; const pos = pq.selectionStart; render(); const n = $('#partyQ'); n.focus(); n.setSelectionRange(pos, pos); });
   $$('[data-upaid]', v).forEach((el) => el.addEventListener('click', async (e) => {
     e.stopPropagation(); const u = byId('utilities', el.dataset.upaid);
     await update('utilities', u, { paid: !u.paid }, { reload: true });
@@ -562,6 +600,89 @@ function finReport() {
       <div class="row" style="justify-content:space-between;padding:4px 0"><span>📦 Винен постачальникам</span><b class="neg">${money(outstanding('payable'))}</b></div>
       <div class="row" style="justify-content:space-between;padding:4px 0"><span>🤝 Мають сплатити клієнти</span><b class="plus">${money(outstanding('receivable'))}</b></div>
     </div>`;
+}
+
+/* ---------- Довідник контрагентів ---------- */
+function partyStats(c) {
+  const tx = S.transactions.filter((t) => t.counterparty === c.name).sort((a, b) => b.date.localeCompare(a.date));
+  const sets = S.settlements.filter((x) => x.counterparty === c.name);
+  const left = (x) => (x.closed ? 0 : Math.max(0, x.amount - settlementPaid(x)));
+  return {
+    tx, sets,
+    paid: sum(tx.filter((t) => t.type === 'expense').map((t) => t.amount)),
+    got: sum(tx.filter((t) => t.type === 'income').map((t) => t.amount)),
+    owe: sum(sets.filter((x) => x.direction === 'payable').map(left)),
+    due: sum(sets.filter((x) => x.direction === 'receivable').map(left))
+  };
+}
+
+function partyHtml(c) {
+  const st = partyStats(c); const t = PARTY[c.type] || PARTY.other;
+  const end = st.owe ? `<div class="amt neg">${money(st.owe)}</div><div class="s">я винен</div>`
+    : st.due ? `<div class="amt plus">${money(st.due)}</div><div class="s">винні мені</div>`
+    : st.paid || st.got ? `<div class="amt">${money(st.paid || st.got)}</div><div class="s">${st.paid ? 'сплачено' : 'отримано'}</div>` : '';
+  return `<div class="item click" data-party="${c.id}"><div class="ico">${t.icon}</div>
+    <div class="grow"><div class="t">${esc(c.name)}</div><div class="s">${[t.label, c.phone, st.tx.length ? `операцій: ${st.tx.length}` : ''].filter(Boolean).map(esc).join(' · ')}</div></div>
+    <div class="end">${end}</div></div>`;
+}
+
+function finParties() {
+  ui.partyType ||= 'all';
+  const q = (ui.partyQuery || '').trim().toLowerCase();
+  let list = S.counterparties.slice();
+  if (ui.partyType !== 'all') list = list.filter((c) => c.type === ui.partyType);
+  if (q) list = list.filter((c) => [c.name, c.phone, c.contact, c.note].join(' ').toLowerCase().includes(q));
+  const cnt = (t) => S.counterparties.filter((c) => t === 'all' || c.type === t).length;
+  return `<input class="search" id="partyQ" placeholder="🔍 Пошук за назвою, телефоном, нотатками…" value="${esc(ui.partyQuery || '')}" autocomplete="off">
+    <div class="chips">${[['all', 'Усі'], ...Object.entries(PARTY).map(([k, p]) => [k, `${p.icon} ${p.label}`])].map(([k, l]) => `<button class="chip ${ui.partyType === k ? 'active' : ''}" data-pt="${k}">${l} · ${cnt(k)}</button>`).join('')}</div>
+    <div class="list">${list.length ? list.map(partyHtml).join('') : `<div class="empty"><div class="e">👥</div>${q ? 'Нічого не знайдено' : 'Довідник порожній.<br>Натисніть «＋», щоб додати постачальника, клієнта чи інвестора.'}</div>`}</div>
+    <p class="hint">Контрагенти також додаються автоматично, коли ви вводите нове імʼя в операції чи розрахунку.</p>`;
+}
+
+function showParty(c) {
+  if (!c) return;
+  const st = partyStats(c); const t = PARTY[c.type] || PARTY.other;
+  const phone = (c.phone || '').replace(/[^\d+]/g, '');
+  openSheet(`<h2>${t.icon} ${esc(c.name)}</h2>
+    <div class="meta"><span class="pill">${t.label}</span>${c.contact ? `<span class="pill gray">${esc(c.contact)}</span>` : ''}</div>
+    ${phone ? `<div class="btns" style="margin:0 0 12px"><a class="btn sm ghost" href="tel:${esc(phone)}">📞 ${esc(c.phone)}</a><a class="btn sm ghost" href="viber://chat?number=%2B${phone.replace(/\D/g, '')}">💜 Viber</a></div>` : ''}
+    ${c.note ? `<div class="detail">${esc(c.note)}</div>` : ''}
+    <div class="grid2" style="margin-bottom:12px">
+      <div class="kpi"><div class="lbl">Сплачено йому</div><div class="val">${money(st.paid)}</div>${st.owe ? `<div class="sub" style="color:var(--red)">я винен ${money(st.owe)}</div>` : ''}</div>
+      <div class="kpi"><div class="lbl">Отримано від нього</div><div class="val plus">${money(st.got)}</div>${st.due ? `<div class="sub" style="color:var(--green)">має сплатити ${money(st.due)}</div>` : ''}</div>
+    </div>
+    <div class="btns" style="margin:0 0 6px"><button class="btn sm sec" id="cpTx">＋ Операція</button><button class="btn sm sec" id="cpSet">＋ Рахунок</button><button class="btn sm ghost" id="cpEdit">✏️ Редагувати</button></div>
+    ${st.sets.length ? `<div class="sec"><h2 style="font-size:15px">📒 Рахунки · ${st.sets.length}</h2></div><div class="list">${st.sets.map(settlementCard).join('')}</div>` : ''}
+    <div class="sec"><h2 style="font-size:15px">💸 Операції · ${st.tx.length}</h2></div>
+    <div class="list">${st.tx.length ? st.tx.map(txHtml).join('') : '<div class="empty" style="padding:18px">Операцій ще немає</div>'}</div>`, (root) => {
+    $('#cpTx', root).addEventListener('click', () => editTx(null, c.type === 'client' ? { type: 'income', counterparty: c.name } : c.type === 'investor' ? { type: 'income', category: 'Інвестиції', counterparty: c.name } : { type: 'expense', scope: 'production', counterparty: c.name }));
+    $('#cpSet', root).addEventListener('click', () => editSettlement(null, { counterparty: c.name, direction: c.type === 'client' ? 'receivable' : 'payable' }));
+    $('#cpEdit', root).addEventListener('click', () => editParty(c));
+    $$('[data-set]', root).forEach((el) => el.addEventListener('click', () => showSettlement(byId('settlements', el.dataset.set))));
+    $$('[data-tx]', root).forEach((el) => el.addEventListener('click', () => editTx(byId('transactions', el.dataset.tx))));
+  }, { reopen: () => showParty(byId('counterparties', c.id)) });
+}
+
+function editParty(c, preset = {}) {
+  const isNew = !c;
+  openForm({
+    title: isNew ? 'Новий контрагент' : 'Редагувати контрагента', values: c ? { ...c } : { type: 'supplier', ...preset },
+    fields: [
+      { name: 'name', label: 'Назва / імʼя', required: true, placeholder: 'ТОВ «Деревпостач», Олена Коваль…' },
+      { name: 'type', label: 'Тип', type: 'toggle', options: Object.fromEntries(Object.entries(PARTY).map(([k, p]) => [k, `${p.icon} ${p.label}`])) },
+      { name: 'phone', label: 'Телефон', type: 'tel', placeholder: '+380…', half: true },
+      { name: 'contact', label: 'Контактна особа / email', half: true },
+      { name: 'note', label: 'Нотатки (реквізити, умови, що постачає)', type: 'textarea' }
+    ],
+    onSave: async (d) => {
+      const dup = findParty(d.name);
+      if (dup && dup.id !== c?.id) { toast('Такий контрагент уже є в довіднику'); return false; }
+      if (isNew) { const it = await create('counterparties', d); S.counterparties.sort((a, b) => a.name.localeCompare(b.name, 'uk')); render(); toast('Додано в довідник'); return it && undefined; }
+      await update('counterparties', c, d, { reload: c.name !== d.name });
+      toast('Збережено');
+    },
+    onDelete: isNew ? null : () => remove('counterparties', c)
+  });
 }
 
 /* Деталізація звіту: на що саме пішли гроші */
@@ -716,7 +837,7 @@ function editTx(x, preset = {}) {
     { name: 'amount', label: 'Сума, ₴', type: 'number', required: true, half: true },
     { name: 'date', label: 'Дата', type: 'date', required: true, half: true },
     { name: 'category', label: 'Категорія', type: 'select', options: catOptions },
-    { name: 'counterparty', label: 'Контрагент (постачальник, клієнт, магазин)', list: counterparties(), placeholder: 'Необовʼязково' },
+    { name: 'counterparty', label: 'Контрагент (постачальник, клієнт, магазин)', party: true, placeholder: 'Почніть вводити — підкажу з довідника' },
     { name: 'project_id', label: 'Проєкт', type: 'select', options: projOptions(), show: (d) => d.type === 'income' || d.scope === 'production' },
     { name: 'note', label: 'Коментар', placeholder: 'Необовʼязково' }
   ];
@@ -735,6 +856,7 @@ function editTx(x, preset = {}) {
       const base = x?.kind || preset.kind;
       d.kind = ['supplier', 'client', 'utility'].includes(base) ? base : d.category === 'Інвестиції' || base === 'investment' ? 'investment' : 'regular';
       d.project_id = d.project_id ? Number(d.project_id) : null;
+      await ensureParty(d.counterparty, d.kind === 'investment' ? 'investor' : d.type === 'income' ? 'client' : 'supplier');
       if (isNew) { if (preset.settlement_id) d.settlement_id = preset.settlement_id; await create('transactions', d); toast('Збережено'); } else await update('transactions', x, d);
     },
     onDelete: isNew ? null : () => remove('transactions', x)
@@ -748,7 +870,7 @@ function editInvestment(x) {
     title: isNew ? 'Інвестиція' : 'Редагувати інвестицію', values: v,
     fields: [
       { name: 'dir', label: 'Рух коштів', type: 'toggle', options: { income: '📈 Отримано', expense: '📉 Повернуто' } },
-      { name: 'counterparty', label: 'Інвестор', required: true, list: investors() },
+      { name: 'counterparty', label: 'Інвестор', required: true, party: true, placeholder: 'Імʼя інвестора' },
       { name: 'amount', label: 'Сума, ₴', type: 'number', required: true, half: true },
       { name: 'date', label: 'Дата', type: 'date', required: true, half: true },
       { name: 'note', label: 'Умови / коментар', type: 'textarea' }
@@ -756,6 +878,7 @@ function editInvestment(x) {
     onSave: async (d) => {
       if (!(d.amount > 0)) { toast('Вкажіть суму'); return false; }
       const data = { type: d.dir, kind: 'investment', scope: null, category: d.dir === 'income' ? 'Інвестиції' : 'Повернення інвестицій', amount: d.amount, date: d.date, counterparty: d.counterparty, note: d.note };
+      await ensureParty(d.counterparty, 'investor');
       if (isNew) await create('transactions', data); else await update('transactions', x, data);
       toast('Збережено');
     },
@@ -802,14 +925,14 @@ function editUtility(u, preset = {}) {
   });
 }
 
-function editSettlement(s) {
+function editSettlement(s, preset = {}) {
   const isNew = !s;
-  const v = s ? { ...s, closed: s.closed ? '1' : '0' } : { direction: ui.setDir, date: today(), closed: '0' };
+  const v = s ? { ...s, closed: s.closed ? '1' : '0' } : { direction: ui.setDir, date: today(), closed: '0', ...preset };
   openForm({
     title: isNew ? (v.direction === 'payable' ? 'Рахунок постачальника' : 'Очікувана оплата від клієнта') : 'Редагувати розрахунок', values: v,
     fields: [
       { name: 'direction', label: 'Тип', type: 'toggle', options: { payable: '📦 Я винен постачальнику', receivable: '🤝 Клієнт винен мені' } },
-      { name: 'counterparty', label: 'Постачальник / клієнт', required: true, list: counterparties() },
+      { name: 'counterparty', label: 'Постачальник / клієнт', required: true, party: true, placeholder: 'Почніть вводити — підкажу з довідника' },
       { name: 'title', label: 'За що', required: true, placeholder: 'Напр.: Плита МДФ, рахунок №125' },
       { name: 'amount', label: 'Сума, ₴', type: 'number', required: true, half: true },
       { name: 'date', label: 'Дата', type: 'date', half: true },
@@ -820,6 +943,7 @@ function editSettlement(s) {
     onSave: async (d) => {
       if (!(d.amount > 0)) { toast('Вкажіть суму'); return false; }
       d.closed = d.closed === '1';
+      await ensureParty(d.counterparty, d.direction === 'payable' ? 'supplier' : 'client');
       if (isNew) await create('settlements', d); else await update('settlements', s, d);
       toast('Збережено');
     },
@@ -1272,7 +1396,7 @@ function editSource(src) {
 
 /* ================= Додати (FAB) ================= */
 function fab() {
-  if (ui.tab === 'finance') return ({ ops: () => editTx(), report: () => editTx(), utilities: () => editUtility(), settlements: () => editSettlement(), invest: () => editInvestment() })[ui.sub]();
+  if (ui.tab === 'finance') return ({ ops: () => editTx(), report: () => editTx(), utilities: () => editUtility(), settlements: () => editSettlement(), invest: () => editInvestment(), parties: () => editParty() })[ui.sub]();
   if (ui.tab === 'planner') return ui.taskView === 'inbox' ? bulkTasks() : editTask();
   if (ui.tab === 'projects') return ui.projectId ? editTask(null, { project_id: ui.projectId, date: '' }) : editProject();
   if (ui.tab === 'leads') return editLead();

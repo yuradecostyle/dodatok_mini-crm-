@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Counterparty;
 use App\Models\Lead;
 use App\Models\Project;
 use App\Models\Settlement;
@@ -29,6 +30,13 @@ class ApiController extends Controller
                 'amount' => 'nullable|numeric|min:0',
                 'date' => 'required|date_format:Y-m-d',
                 'next_date' => $date,
+                'note' => 'nullable|string|max:5000',
+            ]],
+            'counterparties' => [Counterparty::class, [
+                'name' => 'required|string|max:255',
+                'type' => ['required', Rule::in(Counterparty::TYPES)],
+                'phone' => 'nullable|string|max:60',
+                'contact' => 'nullable|string|max:255',
                 'note' => 'nullable|string|max:5000',
             ]],
             'sources' => [Source::class, [
@@ -105,6 +113,7 @@ class ApiController extends Controller
     public function state()
     {
         return [
+            'counterparties' => Counterparty::orderBy('name')->get(),
             'sources' => Source::orderBy('position')->orderBy('id')->get(),
             'leads' => Lead::orderByDesc('date')->orderByDesc('id')->get(),
             'projects' => Project::orderBy('status')->orderByDesc('id')->get(),
