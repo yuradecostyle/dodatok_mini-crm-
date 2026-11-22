@@ -438,6 +438,10 @@ function renderFinance(v) {
   }));
   $$('[data-ff]', v).forEach((b) => b.addEventListener('click', () => { ui.finFilter = b.dataset.ff; render(); }));
   $$('[data-rm]', v).forEach((b) => b.addEventListener('click', () => { ui.repMode = b.dataset.rm; render(); }));
+  $$('[data-drill]', v).forEach((el) => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showDrill(JSON.parse(el.dataset.drill), ui.repMode === 'month' ? ui.repMonth : String(ui.repYear));
+  }));
   $$('[data-dir]', v).forEach((b) => b.addEventListener('click', () => { ui.setDir = b.dataset.dir; render(); }));
   $('#showClosed', v)?.addEventListener('click', () => { ui.showClosed = !ui.showClosed; render(); });
   $('#copyUtil', v)?.addEventListener('click', copyUtilities);
@@ -535,28 +539,87 @@ function finReport() {
     </div>
     ${chart}
     <div class="card"><h3>💸 Витрати за напрямами <span class="right">${money(E)}</span></h3>
-      ${scopeRows.map((r) => `<div class="bar-row">
-        <div class="top"><span class="row" style="gap:8px"><i class="scope-dot" style="background:${r.s.color}"></i>${r.s.icon} ${r.s.label}</span><b>${money(r.total)} <span class="muted small">· ${pct(r.total, E)}%</span></b></div>
+      ${scopeRows.map((r) => `<div class="bar-row drill" data-drill='${JSON.stringify({ t: 'scope', scope: r.k })}'>
+        <div class="top"><span class="row" style="gap:8px"><i class="scope-dot" style="background:${r.s.color}"></i>${r.s.icon} ${r.s.label}</span><b>${money(r.total)} <span class="muted small">· ${pct(r.total, E)}%</span> <span class="chev">›</span></b></div>
         <div class="bar"><i style="width:${(r.total / maxScope) * 100}%;background:${r.s.color}"></i></div>
-        ${r.top.length ? `<div class="small muted" style="margin-top:6px">${r.top.slice(0, 5).map(([c, a]) => `${CAT_ICON[c] || ''} ${esc(c)} <b style="color:var(--ink-2)">${money(a)}</b>`).join(' · ')}</div>` : ''}
+        ${r.top.length ? `<div>${r.top.map(([c, a]) => `<button class="catbtn" data-drill='${esc(JSON.stringify({ t: 'scope', scope: r.k, cat: c }))}'>${CAT_ICON[c] || ''} ${esc(c)} <b>${money(a)}</b></button>`).join('')}</div>` : ''}
       </div>`).join('')}
-      ${other ? `<div class="small muted">Інші витрати без напряму: <b>${money(other)}</b></div>` : ''}
+      ${other ? `<div class="bar-row drill" data-drill='${JSON.stringify({ t: 'noscope' })}'><div class="top"><span>Інші витрати без напряму</span><b>${money(other)} <span class="chev">›</span></b></div></div>` : ''}
+      <p class="hint" style="margin-bottom:0">Натисніть на напрям або категорію, щоб побачити кожну витрату.</p>
     </div>
     ${Object.keys(byProject).length ? `<div class="card"><h3>🏭 Виробництво по проєктах</h3>${Object.entries(byProject).sort((a, b) => b[1] - a[1]).map(([id, a]) => { const p = byId('projects', id); return `<div class="bar-row" data-project="${id}" style="cursor:pointer"><div class="top"><span>${p ? `${p.emoji || '📁'} ${esc(p.name)}` : 'Проєкт'}</span><b>${money(a)}</b></div></div>`; }).join('')}</div>` : ''}
     <div class="card"><h3>💰 Доходи <span class="right">${money(I)}</span></h3>
-      ${incGroups.map(([l, a]) => `<div class="bar-row"><div class="top"><span>${l}</span><b>${money(a)}</b></div><div class="bar green"><i style="width:${pct(a, I)}%"></i></div></div>`).join('')}
+      ${incGroups.map(([l, a], i) => `<div class="bar-row drill" data-drill='${JSON.stringify({ t: 'income', g: i ? 'other' : 'client' })}'><div class="top"><span>${l}</span><b>${money(a)} <span class="chev">›</span></b></div><div class="bar green"><i style="width:${pct(a, I)}%"></i></div></div>`).join('')}
     </div>
     ${inv.length ? `<div class="card" data-go="finance:invest" style="cursor:pointer"><h3>📈 Інвестиції за період <span class="right">не входять у результат</span></h3>
       <div class="row" style="justify-content:space-between;padding:3px 0"><span>Отримано</span><b class="plus">${money(sum(inv.filter((x) => x.type === 'income').map((x) => x.amount)))}</b></div>
       <div class="row" style="justify-content:space-between;padding:3px 0"><span>Повернуто</span><b>${money(sum(inv.filter((x) => x.type === 'expense').map((x) => x.amount)))}</b></div>
       <div class="row" style="justify-content:space-between;padding:3px 0"><span>Чисто залучено</span><b>${money(invNet)}</b></div></div>` : ''}
     <div class="card"><h3>💡 Комунальні послуги <span class="right">${money(sum(util.map((u) => u.amount)))}</span></h3>
-      ${Object.keys(utilByService).length ? Object.entries(utilByService).sort((a, b) => b[1] - a[1]).map(([s, a]) => `<div class="row" style="justify-content:space-between;padding:5px 0"><span>${(UTIL.find((x) => x.name === s) || {}).icon || '🧾'} ${esc(s)}</span><b>${money(a)}</b></div>`).join('') : '<div class="muted small">Немає записів за період</div>'}
+      ${Object.keys(utilByService).length ? Object.entries(utilByService).sort((a, b) => b[1] - a[1]).map(([sv, a]) => `<div class="row drill" data-drill='${esc(JSON.stringify({ t: 'util', service: sv }))}' style="justify-content:space-between;padding:8px"><span>${(UTIL.find((x) => x.name === sv) || {}).icon || '🧾'} ${esc(sv)}</span><b>${money(a)} <span class="chev">›</span></b></div>`).join('') : '<div class="muted small">Немає записів за період</div>'}
     </div>
     <div class="card"><h3>📒 Розрахунки на сьогодні</h3>
       <div class="row" style="justify-content:space-between;padding:4px 0"><span>📦 Винен постачальникам</span><b class="neg">${money(outstanding('payable'))}</b></div>
       <div class="row" style="justify-content:space-between;padding:4px 0"><span>🤝 Мають сплатити клієнти</span><b class="plus">${money(outstanding('receivable'))}</b></div>
     </div>`;
+}
+
+/* Деталізація звіту: на що саме пішли гроші */
+function showDrill(spec, key) {
+  const period = key.length === 4 ? `${key} рік` : monthTitle(key);
+  const inP = (x) => x.date.startsWith(key) && operating(x);
+  const reopen = () => showDrill(spec, key);
+  if (spec.t === 'util') {
+    const us = S.utilities.filter((u) => u.period.startsWith(key) && u.service === spec.service).sort((a, b) => b.period.localeCompare(a.period));
+    openSheet(`<h2>${(UTIL.find((x) => x.name === spec.service) || {}).icon || '🧾'} ${esc(spec.service)}</h2>
+      <div class="kpi" style="margin-bottom:12px"><div class="lbl">${period}</div><div class="val">${money(sum(us.map((u) => u.amount)))}</div><div class="sub">${us.length} нарахувань · оплачено ${money(sum(us.filter((u) => u.paid).map((u) => u.amount)))}</div></div>
+      <div class="list">${us.map(utilHtml).join('') || '<div class="empty">Немає записів</div>'}</div>`, (root) => {
+      $$('[data-util]', root).forEach((el) => el.addEventListener('click', () => editUtility(byId('utilities', el.dataset.util))));
+      $$('[data-upaid]', root).forEach((el) => el.addEventListener('click', async (e) => { e.stopPropagation(); const u = byId('utilities', el.dataset.upaid); await update('utilities', u, { paid: !u.paid }, { reload: true }); refreshTop(); }));
+    }, { reopen });
+    return;
+  }
+  let base; let title;
+  if (spec.t === 'scope') { const sc = SCOPES[spec.scope]; base = S.transactions.filter((x) => inP(x) && x.type === 'expense' && x.scope === spec.scope); title = `${sc.icon} ${sc.label}`; }
+  else if (spec.t === 'noscope') { base = S.transactions.filter((x) => inP(x) && x.type === 'expense' && !x.scope); title = 'Інші витрати'; }
+  else {
+    const isClient = (x) => x.kind === 'client' || x.category === 'Оплата від клієнта';
+    base = S.transactions.filter((x) => inP(x) && x.type === 'income' && (spec.g === 'client' ? isClient(x) : !isClient(x)));
+    title = spec.g === 'client' ? '🤝 Доходи від клієнтів' : '💼 Інші доходи';
+  }
+  const total = sum(base.map((x) => x.amount));
+  const cats = {}; base.forEach((x) => { cats[x.category] = (cats[x.category] || 0) + x.amount; });
+  const catList = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+  const list = (spec.cat ? base.filter((x) => x.category === spec.cat) : base).slice().sort((a, b) => b.date.localeCompare(a.date) || b.amount - a.amount);
+  const shown = sum(list.map((x) => x.amount));
+  // без фільтра — групи за категоріями, з фільтром категорії — за датами
+  const groups = {};
+  list.forEach((x) => { (groups[spec.cat ? fDate(x.date) : x.category] ||= []).push(x); });
+  const order = spec.cat ? Object.keys(groups) : catList.map(([c]) => c).filter((c) => groups[c]);
+  const byCp = {}; list.filter((x) => x.counterparty).forEach((x) => { byCp[x.counterparty] = (byCp[x.counterparty] || 0) + x.amount; });
+  // Рядок деталізації: головне — на що саме витрачено (коментар), далі дата й контрагент
+  const row = (x) => {
+    const proj = x.project_id ? byId('projects', x.project_id) : null;
+    const what = x.note || x.counterparty || x.category;
+    const meta = [fDate(x.date), x.note ? x.counterparty : '', proj ? `${proj.emoji || '📁'} ${proj.name}` : ''].filter(Boolean).join(' · ');
+    return `<div class="item click" data-tx="${x.id}" style="align-items:flex-start">
+      <div class="ico" style="width:36px;height:36px;font-size:16px;border-radius:12px">${CAT_ICON[x.category] || '•'}</div>
+      <div class="grow"><div class="t wrap2">${esc(what)}</div><div class="s">${esc(meta)}</div></div>
+      <div class="amt ${x.type === 'income' ? 'plus' : ''}">${x.type === 'income' ? '+' : '−'}${money(x.amount)}</div></div>`;
+  };
+  openSheet(`<h2>${title}</h2>
+    <div class="grid2" style="margin-bottom:12px">
+      <div class="kpi"><div class="lbl">${esc(period)}</div><div class="val">${money(spec.cat ? shown : total)}</div><div class="sub">${spec.cat ? esc(spec.cat) : 'усього'}</div></div>
+      <div class="kpi"><div class="lbl">Операцій</div><div class="val">${list.length}</div><div class="sub">${list.length ? 'в середньому ' + money(shown / list.length) : '—'}</div></div>
+    </div>
+    ${catList.length > 1 || spec.cat ? `<div class="chips" style="margin:0 -18px;padding:2px 18px 12px"><button class="chip ${!spec.cat ? 'active' : ''}" data-dcat="">Усі · ${money(total)}</button>${catList.map(([c, a]) => `<button class="chip ${spec.cat === c ? 'active' : ''}" data-dcat="${esc(c)}">${CAT_ICON[c] || ''} ${esc(c)} · ${money(a)}</button>`).join('')}</div>` : ''}
+    ${Object.keys(byCp).length > 1 ? `<div class="card flat"><h3>👥 Кому / від кого</h3>${Object.entries(byCp).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([c, a]) => `<div class="row" style="justify-content:space-between;padding:3px 0"><span class="ellipsis">${esc(c)}</span><b>${money(a)}</b></div>`).join('')}</div>` : ''}
+    ${list.length ? order.map((g) => `<div class="sec" style="margin:14px 2px 8px"><h2 style="font-size:14px">${spec.cat ? esc(g) : `${CAT_ICON[g] || ''} ${esc(g)}`}</h2><b class="small">${money(sum(groups[g].map((x) => x.amount)))}</b></div>
+      <div class="list">${groups[g].map(row).join('')}</div>`).join('')
+    : '<div class="empty"><div class="e">🧾</div>Немає операцій за цей період</div>'}`, (root) => {
+    $$('[data-dcat]', root).forEach((b) => b.addEventListener('click', () => { spec.cat = b.dataset.dcat || undefined; refreshTop(); }));
+    $$('[data-tx]', root).forEach((el) => el.addEventListener('click', () => editTx(byId('transactions', el.dataset.tx))));
+  }, { reopen });
 }
 
 function utilHtml(u) {

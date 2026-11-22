@@ -332,3 +332,12 @@ img { max-width: 100%; }
 .voice-big { width: 96px; height: 96px; border-radius: 50%; border: 0; font-size: 40px; background: var(--grad); color: #fff; box-shadow: 0 14px 34px rgba(109, 94, 252, .45); margin: 6px auto 14px; display: grid; place-items: center; }
 .voice-big.rec { background: var(--red); animation: pulse 1.1s infinite; }
 .parsed { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin: 8px 0 4px; min-height: 22px; }
+
+/* ---------- Деталізація звіту ---------- */
+.drill { cursor: pointer; border-radius: 14px; padding: 8px; margin: -8px -8px 6px; transition: background .15s; }
+.drill:active { background: var(--surface-2); }
+.chev { color: var(--muted); font-weight: 800; margin-left: 2px; }
+.catbtn { border: 0; background: var(--surface-2); border-radius: 99px; padding: 5px 10px; font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 6px 5px 0 0; }
+.catbtn b { color: var(--ink); }
+.catbtn:active { background: var(--accent-soft); }
+.item .t.wrap2 { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
