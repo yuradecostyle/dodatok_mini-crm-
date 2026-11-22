@@ -30,7 +30,7 @@ Route::middleware('auth')->group(function () {
         Route::post('/push/unsubscribe', [PushController::class, 'unsubscribe']);
         Route::post('/push/test', [PushController::class, 'test']);
 
-        $res = 'leads|projects|tasks|settlements|utilities|transactions';
+        $res = 'sources|leads|projects|tasks|settlements|utilities|transactions';
         Route::post('/{resource}', [ApiController::class, 'store'])->where('resource', $res);
         Route::put('/{resource}/{id}', [ApiController::class, 'update'])->where('resource', $res)->whereNumber('id');
         Route::delete('/{resource}/{id}', [ApiController::class, 'destroy'])->where('resource', $res)->whereNumber('id');

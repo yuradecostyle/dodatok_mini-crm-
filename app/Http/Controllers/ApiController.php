@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Lead;
 use App\Models\Project;
 use App\Models\Settlement;
+use App\Models\Source;
 use App\Models\Task;
 use App\Models\Transaction;
 use App\Models\Utility;
@@ -23,12 +24,17 @@ class ApiController extends Controller
                 'name' => 'required|string|max:255',
                 'contact' => 'nullable|string|max:255',
                 'request' => 'nullable|string|max:5000',
-                'source' => ['required', Rule::in(Lead::SOURCES)],
+                'source_id' => 'nullable|integer|exists:sources,id',
                 'status' => ['required', Rule::in(Lead::STATUSES)],
                 'amount' => 'nullable|numeric|min:0',
                 'date' => 'required|date_format:Y-m-d',
                 'next_date' => $date,
                 'note' => 'nullable|string|max:5000',
+            ]],
+            'sources' => [Source::class, [
+                'name' => 'required|string|max:60',
+                'channel' => ['required', Rule::in(Source::CHANNELS)],
+                'position' => 'nullable|integer',
             ]],
             'projects' => [Project::class, [
                 'name' => 'required|string|max:255',
@@ -99,6 +105,7 @@ class ApiController extends Controller
     public function state()
     {
         return [
+            'sources' => Source::orderBy('position')->orderBy('id')->get(),
             'leads' => Lead::orderByDesc('date')->orderByDesc('id')->get(),
             'projects' => Project::orderBy('status')->orderByDesc('id')->get(),
             'tasks' => Task::orderBy('position')->orderBy('id')->get(),

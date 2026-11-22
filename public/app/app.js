@@ -21,12 +21,23 @@ const CAT_ICON = {
   'Подарунки': '🎁', 'Підписки': '🔁', 'Оплата від клієнта': '🤝', 'Продажі': '💼', 'Зарплата': '💳', 'Інвестиції': '📈',
   'Повернення боргу': '↩️', 'Повернення інвестицій': '📉', 'Інше': '•'
 };
-const SOURCES = {
-  viber_personal: { label: 'Особистий Viber', short: 'Viber · особистий', cls: 'viber', icon: '📞' },
-  viber_work: { label: 'Робочий Viber', short: 'Viber · робочий', cls: 'viber', icon: '📞' },
-  telegram_personal: { label: 'Особистий Telegram', short: 'Telegram · особистий', cls: 'telegram', icon: '✈️' },
-  telegram_work: { label: 'Робочий Telegram', short: 'Telegram · робочий', cls: 'telegram', icon: '✈️' }
+/* Типи рекламних каналів; самі канали (джерела) користувач додає сам */
+const CHANNELS = {
+  viber: { label: 'Viber', icon: '💜', color: '#7360f2' },
+  telegram: { label: 'Telegram', icon: '✈️', color: '#229ed9' },
+  instagram: { label: 'Instagram', icon: '📸', color: '#e1306c' },
+  facebook: { label: 'Facebook', icon: '📘', color: '#1877f2' },
+  tiktok: { label: 'TikTok', icon: '🎵', color: '#222222' },
+  google: { label: 'Google / реклама', icon: '🔎', color: '#ea4335' },
+  site: { label: 'Сайт', icon: '🌐', color: '#0ea5e9' },
+  olx: { label: 'OLX / Prom', icon: '🛒', color: '#0f9d8a' },
+  youtube: { label: 'YouTube', icon: '▶️', color: '#ff0000' },
+  phone: { label: 'Дзвінок', icon: '☎️', color: '#10b981' },
+  referral: { label: 'Рекомендація', icon: '🤝', color: '#f59e0b' },
+  offline: { label: 'Офлайн / виставка', icon: '🏪', color: '#64748b' },
+  other: { label: 'Інше', icon: '📣', color: '#6d5efc' }
 };
+const chOf = (src) => CHANNELS[src?.channel] || CHANNELS.other;
 const LEAD_STATUS = {
   new: { label: 'Новий', short: 'Нові', cls: '' },
   work: { label: 'В роботі', short: 'В роботі', cls: 'amber' },
@@ -107,7 +118,7 @@ async function api(method, url, body) {
   return data;
 }
 
-let S = { leads: [], projects: [], tasks: [], settlements: [], utilities: [], transactions: [] };
+let S = { sources: [], leads: [], projects: [], tasks: [], settlements: [], utilities: [], transactions: [] };
 async function refresh() { S = await api('GET', '/api/state'); render(); }
 async function create(res, data, { reload = false } = {}) {
   const it = await api('POST', `/api/${res}`, data);
@@ -126,6 +137,8 @@ async function remove(res, item, { reload = false } = {}) {
   if (reload) await refresh(); else render();
 }
 const byId = (res, id) => S[res].find((x) => x.id === Number(id));
+const srcOf = (lead) => (lead?.source_id ? byId('sources', lead.source_id) : null);
+const srcBadge = (src) => (src ? `<span class="src" style="background:${chOf(src).color}">${chOf(src).icon} ${esc(src.name)}</span>` : '<span class="pill gray">без джерела</span>');
 
 /* ================= Стан інтерфейсу ================= */
 const ui = {
@@ -183,8 +196,17 @@ function bind(v) {
     if (!title) return;
     const extra = JSON.parse(f.dataset.quick || '{}');
     input.value = '';
-    await create('tasks', { title, priority: 'low', ...extra });
-    $('form[data-quick] input')?.focus();
+    const p = parseTaskText(title, extra.date);
+    const data = { priority: 'low', ...extra, title: p.title || title };
+    if (p.date) data.date = p.date;
+    if (p.time) data.time = p.time;
+    if (p.remind_minutes !== null) { data.remind_minutes = p.remind_minutes; ensurePushAsked(); }
+    await create('tasks', data);
+    toast(p.date || p.time ? `Додано${p.date ? ' на ' + fDate(p.date) : ''}${p.time ? ' о ' + p.time : ''}${data.remind_minutes != null ? ' 🔔' : ''}` : 'Додано');
+  }));
+  $$('form[data-quick] [data-mic]', v).forEach((b) => b.addEventListener('click', () => {
+    const f = b.closest('form');
+    dictate(f.querySelector('input'), b, { onFinal: () => f.requestSubmit() });
   }));
 }
 
@@ -196,25 +218,72 @@ function openProject(id) {
 }
 
 /* ================= Нижня панель і форми ================= */
-let sheetClose = null;
-function openSheet(html, mount) {
-  closeSheet();
-  const bg = document.createElement('div');
-  bg.className = 'sheet-bg';
-  bg.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div>`;
-  document.body.appendChild(bg);
-  document.body.style.overflow = 'hidden';
-  bg.addEventListener('click', (e) => { if (e.target === bg) closeSheet(); });
-  sheetClose = () => { bg.remove(); document.body.style.overflow = ''; sheetClose = null; };
-  mount?.($('.sheet', bg));
+/* Стек вікон: кожне нове вікно відкривається поверх попереднього, «←» повертає на крок назад */
+const stack = [];
+let restoring = false;
+let reopened = false;
+function openSheet(html, mount, opts = {}) {
+  const entry = { html, mount, reopen: opts.reopen || null, save: opts.save || null };
+  if (restoring) { stack[stack.length - 1] = entry; reopened = true; } else {
+    stack[stack.length - 1]?.save?.();
+    stack.push(entry);
+    if (!history.state?.sheet) history.pushState({ sheet: true }, '');
+  }
+  drawSheet();
 }
-function closeSheet() { sheetClose?.(); }
+function drawSheet() {
+  const top = stack[stack.length - 1];
+  let bg = $('.sheet-bg');
+  if (!bg) {
+    bg = document.createElement('div');
+    bg.className = 'sheet-bg';
+    document.body.appendChild(bg);
+    bg.addEventListener('click', (e) => { if (e.target === bg) closeAll(); });
+  }
+  document.body.style.overflow = 'hidden';
+  const m = top.html.match(/^\s*<h2>([\s\S]*?)<\/h2>/);
+  const title = m ? m[1] : '';
+  const body = m ? top.html.slice(m[0].length) : top.html;
+  const deep = stack.length > 1;
+  bg.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>
+    <div class="sheet-head"><button class="icon-btn sm" data-sback aria-label="Назад">←</button><h2>${title}</h2>${deep ? '<button class="icon-btn sm" data-sclose aria-label="Закрити все">✕</button>' : ''}</div>${body}</div>`;
+  bg.querySelector('[data-sback]').addEventListener('click', back);
+  bg.querySelector('[data-sclose]')?.addEventListener('click', closeAll);
+  top.mount?.($('.sheet', bg));
+}
+function hideSheet() { $('.sheet-bg')?.remove(); document.body.style.overflow = ''; }
+/* Перебудувати вікно з актуальними даними (opener може бути асинхронним) */
+async function runReopen(top) {
+  restoring = true; reopened = false;
+  try { await top.reopen(); } finally { restoring = false; }
+  return reopened;
+}
+/** Крок назад: закрити верхнє вікно й показати попереднє (з оновленими даними). */
+async function back() {
+  if (!stack.length) return false;
+  stack.pop();
+  if (!stack.length) { hideSheet(); return true; }
+  const top = stack[stack.length - 1];
+  if (top.reopen) {
+    if (!(await runReopen(top))) return back(); // запис зник (наприклад, видалено) — ще крок назад
+  } else drawSheet();
+  return true;
+}
+/** Перемалювати поточне вікно з актуальними даними. */
+async function refreshTop() {
+  const top = stack[stack.length - 1];
+  if (top?.reopen && !(await runReopen(top))) back();
+}
+function closeAll() { stack.length = 0; hideSheet(); }
+const closeSheet = back;
 
 /**
  * Форма. fields: [{name,label,type,options,required,half,placeholder,list,show:(values)=>bool}]
  * type: text|number|date|time|month|select|textarea|toggle|color|emoji
  */
-function openForm({ title, fields, values = {}, onSave, onDelete, extra = '', mount, submit = 'Зберегти' }) {
+function openForm(opts) {
+  const { title, fields, values = {}, onSave, onDelete, extra = '', mount, submit = 'Зберегти', rebuild } = opts;
+  let saved = null;
   const opt = (o) => (Array.isArray(o) ? o.map((x) => [x, x]) : Object.entries(o));
   const field = (f) => {
     const v = values[f.name] ?? f.default ?? '';
@@ -232,7 +301,8 @@ function openForm({ title, fields, values = {}, onSave, onDelete, extra = '', mo
       input = `<input type="${f.type || 'text'}" name="${f.name}" value="${esc(v)}" ${num} placeholder="${esc(f.placeholder || '')}" ${f.list ? `list="dl-${f.name}"` : ''} autocomplete="off">` +
         (f.list ? `<datalist id="dl-${f.name}">${f.list.map((x) => `<option value="${esc(x)}">`).join('')}</datalist>` : '');
     }
-    return `<div class="f" data-field="${f.name}"><label>${esc(f.label)}</label>${input}</div>`;
+    if (f.mic) input = `<div class="with-mic">${input}<button type="button" class="mic" data-mic-for="${f.name}" aria-label="Надиктувати">🎤</button></div>`;
+    return `<div class="f" data-field="${f.name}"><label>${esc(f.label)}</label>${input}${f.after || ''}</div>`;
   };
   let body = '';
   for (let i = 0; i < fields.length; i++) {
@@ -265,10 +335,18 @@ function openForm({ title, fields, values = {}, onSave, onDelete, extra = '', mo
       }
       const btn = form.querySelector('button[type=submit]');
       btn.disabled = true;
-      try { if (await onSave(data) !== false) closeSheet(); } catch (err) { /* toast вже показано */ } finally { btn.disabled = false; }
+      try { if (await onSave(data) !== false) back(); } catch (err) { /* toast вже показано */ } finally { btn.disabled = false; }
     });
-    if (onDelete) $('#sfDel', root).addEventListener('click', async () => { if (confirm('Видалити?')) { await onDelete(); closeSheet(); toast('Видалено'); } });
+    if (onDelete) $('#sfDel', root).addEventListener('click', async () => { if (confirm('Видалити?')) { try { await onDelete(); } catch { return; } back(); toast('Видалено'); } });
+    saved = read;
+    $$('[data-mic-for]', root).forEach((b) => b.addEventListener('click', () => {
+      const el = root.querySelector(`[name="${b.dataset.micFor}"]`);
+      dictate(el, b, { append: el.tagName === 'TEXTAREA', onFinal: (text) => opts.onVoice?.(text, root, b.dataset.micFor) });
+    }));
     mount?.(root, read);
+  }, {
+    save: () => { if (saved) { const cur = saved(); saved = () => cur; } },
+    reopen: () => { const cur = saved ? saved() : {}; rebuild ? rebuild(cur) : openForm({ ...opts, values: { ...values, ...cur } }); }
   });
 }
 
@@ -325,7 +403,7 @@ function renderHome(v) {
       <div class="grow"><b>Виконано ${done} з ${todays.length}</b><div class="small muted">${overdue.length ? `<span style="color:var(--red);font-weight:700">Прострочено: ${overdue.length}</span>` : 'Без прострочених справ'}</div></div>
     </div>
     <div class="list">
-      <form class="quick" data-quick='${JSON.stringify({ date: t })}'><input placeholder="Швидко додати справу на сьогодні…" enterkeyhint="done"><button>＋</button></form>
+      <form class="quick" data-quick='${JSON.stringify({ date: t })}'><input placeholder="Швидко додати справу на сьогодні…" enterkeyhint="done"><button type="button" class="mic" data-mic aria-label="Надиктувати">🎤</button><button>＋</button></form>
       ${todays.length ? todays.map(taskHtml).join('') : '<div class="empty" style="padding:22px">На сьогодні нічого. Додайте справу вище ✨</div>'}
     </div>
 
@@ -711,8 +789,8 @@ function showSettlement(s) {
     });
     $$('[data-tx]', root).forEach((el) => el.addEventListener('click', () => editTx(byId('transactions', el.dataset.tx))));
     $('#editSet', root).addEventListener('click', () => editSettlement(s));
-    $('#closeSet', root)?.addEventListener('click', async () => { await update('settlements', s, { closed: true }); closeSheet(); toast('Рахунок закрито'); });
-  });
+    $('#closeSet', root)?.addEventListener('click', async () => { await update('settlements', s, { closed: true }); refreshTop(); toast('Рахунок закрито'); });
+  }, { reopen: () => showSettlement(byId('settlements', s.id)) });
 }
 
 /* ================= ПЛАНЕР ================= */
@@ -755,7 +833,7 @@ function renderPlanner(v) {
       <div class="card row"><div class="ring" style="--p:${pct(done, list.length)}"><span>${pct(done, list.length)}%</span></div>
         <div class="grow"><b>Виконано ${done} з ${list.length}</b><div class="small muted">${list.filter((x) => x.remind_at && !x.done).length} з нагадуванням</div></div>
         <button class="btn sm sec" id="bulkBtn">☰ Списком</button></div>
-      <div class="list"><form class="quick" data-quick='${JSON.stringify({ date: ui.taskDate })}'><input placeholder="Нова справа на цей день…" enterkeyhint="done"><button>＋</button></form>
+      <div class="list"><form class="quick" data-quick='${JSON.stringify({ date: ui.taskDate })}'><input placeholder="Нова справа на цей день…" enterkeyhint="done"><button type="button" class="mic" data-mic aria-label="Надиктувати">🎤</button><button>＋</button></form>
         ${list.length ? list.map((x) => taskHtml(x)).join('') : '<div class="empty" style="padding:24px"><div class="e">🗓️</div>Справ на цей день немає</div>'}</div>
       ${overdue.length ? `<div class="sec"><h2 style="color:var(--red)">Прострочені · ${overdue.length}</h2><button class="link" id="moveOverdue">На сьогодні →</button></div><div class="list">${overdue.map((x) => taskHtml(x, { showDate: true })).join('')}</div>` : ''}
       ${list.some((x) => !x.done) && ui.taskDate <= t ? '<button class="btn ghost" id="moveUndone">Перенести невиконані на завтра</button>' : ''}`;
@@ -787,7 +865,7 @@ function renderPlanner(v) {
     const inbox = S.tasks.filter((x) => !x.date && !x.project_id).sort(taskSort);
     const open = inbox.filter((x) => !x.done); const done = inbox.filter((x) => x.done);
     html += `<div class="card row"><div class="grow"><b>Швидкий список</b><div class="small muted">Справи без дати й проєкту. Вставте кілька рядків, щоб додати їх одним разом.</div></div><button class="btn sm sec" id="bulkBtn">☰ Списком</button></div>
-      <div class="list"><form class="quick" data-quick='{}'><input placeholder="Що потрібно зробити?" enterkeyhint="done"><button>＋</button></form>
+      <div class="list"><form class="quick" data-quick='{}'><input placeholder="Що потрібно зробити?" enterkeyhint="done"><button type="button" class="mic" data-mic aria-label="Надиктувати">🎤</button><button>＋</button></form>
         ${open.length ? open.map((x) => taskHtml(x)).join('') : '<div class="empty" style="padding:24px"><div class="e">📝</div>Список порожній</div>'}</div>
       ${done.length ? `<div class="sec"><h2 style="font-size:15px">Виконані · ${done.length}</h2><button class="link" id="clearDone">Очистити</button></div><div class="list">${done.map((x) => taskHtml(x)).join('')}</div>` : ''}`;
   }
@@ -826,7 +904,7 @@ function bulkTasks(preset = {}) {
   openForm({
     title: 'Додати списком', submit: 'Створити справи', values: { project_id: preset.project_id || '', date: preset.date || '' },
     fields: [
-      { name: 'lines', label: 'Кожен рядок — окрема справа', type: 'textarea', required: true, placeholder: 'Купити фурнітуру\nЗателефонувати постачальнику\nПорахувати кошторис' },
+      { name: 'lines', label: 'Кожен рядок — окрема справа (🎤 — кожна фраза з нового рядка)', type: 'textarea', required: true, mic: true, placeholder: 'Купити фурнітуру\nЗателефонувати постачальнику\nПорахувати кошторис' },
       { name: 'project_id', label: 'Проєкт', type: 'select', options: projOptions(), half: true },
       { name: 'date', label: 'Дата (необовʼязково)', type: 'date', half: true }
     ],
@@ -846,7 +924,7 @@ function editTask(x, preset = {}) {
   const isNew = !x;
   const v = x ? { ...x, remind_minutes: x.remind_minutes ?? '' } : { date: ui.tab === 'planner' && ui.taskView !== 'inbox' ? ui.taskDate : '', priority: 'low', remind_minutes: '', repeat: 'none', ...preset };
   const fields = [
-    { name: 'title', label: 'Справа', required: true, placeholder: 'Що потрібно зробити?' },
+    { name: 'title', label: 'Справа', required: true, placeholder: 'Що потрібно зробити?', mic: true },
     { name: 'project_id', label: 'Проєкт', type: 'select', options: projOptions() },
     { name: 'date', label: 'Дата', type: 'date', half: true },
     { name: 'time', label: 'Час', type: 'time', half: true },
@@ -858,6 +936,14 @@ function editTask(x, preset = {}) {
   openForm({
     title: isNew ? 'Нова справа' : 'Справа', fields, values: v,
     extra: `<p class="hint" id="remHint"></p>`,
+    onVoice: (text, root) => {
+      const p = parseTaskText(text);
+      const set = (n, val) => { const el = root.querySelector(`[name="${n}"]`); if (el && val != null) { el.value = val; el.dispatchEvent(new Event('change', { bubbles: true })); } };
+      set('title', p.title || text);
+      if (p.date) set('date', p.date);
+      if (p.time) set('time', p.time);
+      if (p.remind_minutes !== null) set('remind_minutes', String(p.remind_minutes));
+    },
     mount: (root, read) => {
       const h = () => { const d = read(); $('#remHint', root).textContent = d.remind_minutes !== '' ? (!d.date ? '⚠️ Для нагадування вкажіть дату.' : !d.time ? 'Час не вказано — нагадаю о 09:00.' : '') : ''; };
       root.querySelector('#sf').addEventListener('change', h); h();
@@ -899,7 +985,7 @@ function projectCard(p) {
   return `<div class="pcard" data-project="${p.id}" style="--pc:${p.color}">
     <div class="em">${p.emoji || '📁'}</div>
     <div class="grow"><div style="font-weight:800;font-size:16px" class="ellipsis">${esc(p.name)}</div>
-      <div class="small muted ellipsis">${[st.open ? `${st.open} відкритих справ` : st.total ? 'Усе виконано ✓' : 'Без справ', p.due_date ? `${late ? '⚠️ ' : ''}до ${fDate(p.due_date)}` : '', lead ? SOURCES[lead.source]?.short : ''].filter(Boolean).join(' · ')}</div>
+      <div class="small muted ellipsis">${[st.open ? `${st.open} відкритих справ` : st.total ? 'Усе виконано ✓' : 'Без справ', p.due_date ? `${late ? '⚠️ ' : ''}до ${fDate(p.due_date)}` : '', lead ? srcOf(lead)?.name : ''].filter(Boolean).join(' · ')}</div>
       <div class="bar" style="margin-top:9px"><i style="width:${pct(st.done, st.total)}%;background:${p.color}"></i></div></div>
     <div class="ring" style="--p:${pct(st.done, st.total)};background:conic-gradient(${p.color} calc(var(--p) * 1%), var(--bg) 0)"><span>${pct(st.done, st.total)}%</span></div>
   </div>`;
@@ -924,13 +1010,13 @@ function renderProject(v, p) {
     <div class="phead" style="--pc:${p.color}">
       <div style="font-size:30px">${p.emoji || '📁'}</div>
       <h2>${esc(p.name)}</h2>
-      <div class="meta"><span>${{ active: '🟢 Активний', paused: '⏸ На паузі', done: '✅ Завершено' }[p.status]}</span>${p.due_date ? `<span>📅 до ${fDateY(p.due_date)}</span>` : ''}<span>✓ ${st.done}/${st.total}</span>${lead ? `<span>${SOURCES[lead.source]?.icon} ${esc(lead.name)}</span>` : ''}</div>
+      <div class="meta"><span>${{ active: '🟢 Активний', paused: '⏸ На паузі', done: '✅ Завершено' }[p.status]}</span>${p.due_date ? `<span>📅 до ${fDateY(p.due_date)}</span>` : ''}<span>✓ ${st.done}/${st.total}</span>${lead ? `<span>${chOf(srcOf(lead)).icon} ${esc(lead.name)}</span>` : ''}</div>
       <div class="bar"><i style="width:${pct(st.done, st.total)}%"></i></div>
     </div>
     ${p.description ? `<div class="detail">${esc(p.description)}</div>` : ''}
     <div class="btns" style="margin:0 0 12px"><button class="btn sm ghost" id="pEdit">✏️ Редагувати</button><button class="btn sm ghost" id="pBulk">☰ Справи списком</button>${lead ? `<button class="btn sm ghost" data-lead="${lead.id}">🎯 Лід</button>` : ''}</div>
     <div class="sec" style="margin-top:6px"><h2>Справи · ${open.length}</h2></div>
-    <div class="list"><form class="quick" data-quick='${JSON.stringify({ project_id: p.id })}'><input placeholder="Додати справу до проєкту…" enterkeyhint="done"><button>＋</button></form>
+    <div class="list"><form class="quick" data-quick='${JSON.stringify({ project_id: p.id })}'><input placeholder="Додати справу до проєкту…" enterkeyhint="done"><button type="button" class="mic" data-mic aria-label="Надиктувати">🎤</button><button>＋</button></form>
       ${open.length ? open.map((t) => taskHtml(t, { inProject: true, showDate: true })).join('') : '<div class="empty" style="padding:22px">Відкритих справ немає</div>'}</div>
     ${done.length ? `<button class="link" id="pDone">${ui.showDone ? 'Сховати' : 'Показати'} виконані (${done.length})</button>${ui.showDone ? `<div class="list" style="margin-top:8px">${done.map((t) => taskHtml(t, { inProject: true })).join('')}</div>` : ''}` : ''}
     <div class="sec"><h2>💸 Фінанси проєкту</h2><button class="link" id="pTx">＋ Операція</button></div>
@@ -954,12 +1040,13 @@ function editProject(p, preset = {}) {
       { name: 'color', label: 'Колір', type: 'color' },
       { name: 'due_date', label: 'Дедлайн', type: 'date', half: true },
       { name: 'status', label: 'Статус', type: 'select', options: { active: 'Активний', paused: 'На паузі', done: 'Завершено' }, half: true },
-      { name: 'lead_id', label: 'Повʼязаний лід (клієнт)', type: 'select', options: { '': '— немає —', ...Object.fromEntries(S.leads.map((l) => [l.id, `${l.name} · ${SOURCES[l.source]?.short || ''}`])) } },
+      { name: 'lead_id', label: 'Повʼязаний лід (клієнт)', type: 'select', options: { '': '— немає —', ...Object.fromEntries(S.leads.map((l) => [l.id, `${l.name}${srcOf(l) ? ' · ' + srcOf(l).name : ''}`])) } },
       { name: 'description', label: 'Опис', type: 'textarea' }
     ],
     onSave: async (d) => {
       d.lead_id = d.lead_id ? Number(d.lead_id) : null;
-      if (isNew) { const it = await create('projects', d); openProject(it.id); } else await update('projects', p, d);
+      if (isNew) { const it = await create('projects', d); closeAll(); openProject(it.id); toast('Проєкт створено'); return false; }
+      await update('projects', p, d);
       toast('Збережено');
     },
     onDelete: isNew ? null : async () => { ui.projectId = null; await remove('projects', p, { reload: true }); }
@@ -968,12 +1055,12 @@ function editProject(p, preset = {}) {
 
 /* ================= ЛІДИ ================= */
 function leadHtml(x) {
-  const st = LEAD_STATUS[x.status]; const src = SOURCES[x.source];
+  const st = LEAD_STATUS[x.status]; const src = srcOf(x);
   const late = x.next_date && x.next_date < today() && ['new', 'work', 'offer'].includes(x.status);
   return `<div class="item click" data-lead="${x.id}">
-    <div class="ico" style="background:${src?.cls === 'viber' ? 'rgba(115,96,242,.14)' : 'rgba(34,158,217,.14)'}">${esc((x.name || '?').trim()[0]?.toUpperCase() || '?')}</div>
+    <div class="ico" style="background:color-mix(in srgb, ${chOf(src).color} 15%, transparent)">${esc((x.name || '?').trim()[0]?.toUpperCase() || '?')}</div>
     <div class="grow"><div class="t">${esc(x.name)}</div><div class="s">${esc(x.request || 'Без опису')}</div>
-      <div class="tags"><span class="src ${src?.cls}">${src?.icon} ${src?.short}</span><span class="pill ${st.cls}">${st.label}</span>${x.next_date && ['new', 'work', 'offer'].includes(x.status) ? `<span class="pill ${late ? 'red' : 'gray'}">📅 ${fDate(x.next_date)}</span>` : ''}</div></div>
+      <div class="tags">${srcBadge(src)}<span class="pill ${st.cls}">${st.label}</span>${x.next_date && ['new', 'work', 'offer'].includes(x.status) ? `<span class="pill ${late ? 'red' : 'gray'}">📅 ${fDate(x.next_date)}</span>` : ''}</div></div>
     <div class="end">${x.amount ? `<div class="amt">${money(x.amount)}</div>` : ''}<div class="s">${fDate(x.date)}</div></div>
   </div>`;
 }
@@ -983,10 +1070,10 @@ function renderLeads(v) {
   let list = S.leads.slice();
   if (ui.leadStatus !== 'all') list = list.filter((x) => x.status === ui.leadStatus);
   if (ui.leadQuery) { const q = ui.leadQuery.toLowerCase(); list = list.filter((x) => [x.name, x.contact, x.request, x.note].join(' ').toLowerCase().includes(q)); }
-  const srcStats = Object.entries(SOURCES).map(([k, s]) => {
-    const xs = S.leads.filter((x) => x.source === k);
-    return { s, n: xs.length, won: xs.filter((x) => x.status === 'won').length, sum: sum(xs.filter((x) => x.status === 'won').map((x) => x.amount)) };
-  });
+  const groups = [...S.sources.map((s) => ({ s, xs: S.leads.filter((x) => x.source_id === s.id) }))];
+  const none = S.leads.filter((x) => !srcOf(x));
+  if (none.length) groups.push({ s: null, xs: none });
+  const srcStats = groups.map(({ s, xs }) => ({ s, n: xs.length, won: xs.filter((x) => x.status === 'won').length, sum: sum(xs.filter((x) => x.status === 'won').map((x) => x.amount)) }));
   const maxN = Math.max(...srcStats.map((x) => x.n), 1);
   const pipeline = sum(S.leads.filter((x) => ['new', 'work', 'offer'].includes(x.status)).map((x) => x.amount));
   const closed = counts.won + counts.lost;
@@ -999,7 +1086,11 @@ function renderLeads(v) {
     <input class="search" id="leadQ" placeholder="🔍 Пошук за імʼям, запитом, контактом…" value="${esc(ui.leadQuery)}">
     ${ui.leadStatus !== 'all' ? `<p class="hint">Фільтр: <b>${LEAD_STATUS[ui.leadStatus].label}</b> · <button class="link" data-ls="${ui.leadStatus}">показати всіх</button></p>` : ''}
     <div class="list">${list.length ? list.map(leadHtml).join('') : '<div class="empty"><div class="e">🎯</div>Лідів поки немає.<br>Натисніть «＋», щоб зафіксувати людину, запит і джерело.</div>'}</div>
-    <div class="card"><h3>📊 Звідки приходять</h3>${srcStats.map((x) => `<div class="bar-row"><div class="top"><span><span class="src ${x.s.cls}">${x.s.icon}</span> ${x.s.label}</span><span><b>${x.n}</b> <span class="muted small">· успіх ${x.won}${x.sum ? ' · ' + money(x.sum) : ''}</span></span></div><div class="bar"><i style="width:${(x.n / maxN) * 100}%;background:var(--${x.s.cls})"></i></div></div>`).join('')}</div>`;
+    <div class="card"><h3>📣 Рекламні канали <button class="link right" id="srcManage" style="margin-left:auto">⚙️ Керувати</button></h3>
+      ${srcStats.length ? srcStats.map((x) => `<div class="bar-row"><div class="top"><span>${x.s ? `${chOf(x.s).icon} ${esc(x.s.name)}` : '— без джерела'}</span><span><b>${x.n}</b> <span class="muted small">· успіх ${x.won}${x.sum ? ' · ' + money(x.sum) : ''}</span></span></div><div class="bar"><i style="width:${(x.n / maxN) * 100}%;background:${x.s ? chOf(x.s).color : 'var(--muted)'}"></i></div></div>`).join('') : '<div class="muted small">Каналів ще немає</div>'}
+      <button class="btn sm sec" id="srcAdd" style="margin-top:12px">＋ Додати канал</button></div>`;
+  $('#srcManage', v).addEventListener('click', manageSources);
+  $('#srcAdd', v).addEventListener('click', () => editSource());
   $$('[data-ls]', v).forEach((b) => b.addEventListener('click', () => { ui.leadStatus = ui.leadStatus === b.dataset.ls ? 'all' : b.dataset.ls; render(); }));
   const q = $('#leadQ', v);
   q.addEventListener('input', () => { ui.leadQuery = q.value; const pos = q.selectionStart; render(); const n = $('#leadQ'); n.focus(); n.setSelectionRange(pos, pos); });
@@ -1012,8 +1103,9 @@ function contactLinks(lead) {
   const user = /^@?[A-Za-z][\w]{3,}$/.test(c) ? c.replace(/^@/, '') : null;
   const out = [];
   if (phone) out.push(`<a class="btn sm ghost" href="tel:${esc(phone)}">📞 Подзвонити</a>`);
-  if (lead.source.startsWith('viber') && phone) out.push(`<a class="btn sm ghost" href="viber://chat?number=%2B${digits}">💜 Viber</a>`);
-  if (lead.source.startsWith('telegram')) {
+  const ch = srcOf(lead)?.channel;
+  if (ch === 'viber' && phone) out.push(`<a class="btn sm ghost" href="viber://chat?number=%2B${digits}">💜 Viber</a>`);
+  if (ch === 'telegram' || (!phone && user)) {
     if (user) out.push(`<a class="btn sm ghost" href="https://t.me/${esc(user)}" target="_blank" rel="noopener">✈️ Telegram</a>`);
     else if (phone) out.push(`<a class="btn sm ghost" href="https://t.me/+${digits}" target="_blank" rel="noopener">✈️ Telegram</a>`);
   }
@@ -1022,11 +1114,11 @@ function contactLinks(lead) {
 
 function showLead(x) {
   if (!x) return;
-  const src = SOURCES[x.source];
+  const src = srcOf(x);
   const proj = S.projects.find((p) => p.lead_id === x.id);
   openSheet(`
     <h2>${esc(x.name)}</h2>
-    <div class="meta"><span class="src ${src?.cls}">${src?.icon} ${src?.label}</span><span class="pill ${LEAD_STATUS[x.status].cls}">${LEAD_STATUS[x.status].label}</span><span class="pill gray">${fDateY(x.date)}</span>${x.amount ? `<span class="pill green">${money(x.amount)}</span>` : ''}${x.next_date ? `<span class="pill amber">📅 контакт ${fDate(x.next_date)}</span>` : ''}</div>
+    <div class="meta">${srcBadge(src)}<span class="pill ${LEAD_STATUS[x.status].cls}">${LEAD_STATUS[x.status].label}</span><span class="pill gray">${fDateY(x.date)}</span>${x.amount ? `<span class="pill green">${money(x.amount)}</span>` : ''}${x.next_date ? `<span class="pill amber">📅 контакт ${fDate(x.next_date)}</span>` : ''}</div>
     ${x.contact ? `<p style="margin:0 0 8px"><b>Контакт:</b> ${esc(x.contact)}</p>` : ''}
     ${contactLinks(x)}
     <div class="detail">${esc(x.request) || '<span class="muted">Запит не описано</span>'}${x.note ? `\n\n<span class="muted">Нотатки:</span>\n${esc(x.note)}` : ''}</div>
@@ -1036,26 +1128,29 @@ function showLead(x) {
   `, (root) => {
     $('#lst', root).addEventListener('click', async (e) => {
       const b = e.target.closest('button'); if (!b) return;
-      await update('leads', x, { status: b.dataset.v }); closeSheet(); toast(`Етап: ${LEAD_STATUS[x.status].label}`);
+      await update('leads', x, { status: b.dataset.v }); refreshTop(); toast(`Етап: ${LEAD_STATUS[x.status].label}`);
       if (x.status === 'won' && x.amount && confirm(`Створити очікувану оплату ${money(x.amount)} від «${x.name}» у розрахунках?`)) {
         await create('settlements', { direction: 'receivable', counterparty: x.name, title: x.request?.slice(0, 120) || 'Замовлення', amount: x.amount, date: today() });
         toast('Додано в «Розрахунки → Від клієнтів»');
       }
     });
-    $('#lProj', root).addEventListener('click', () => { closeSheet(); if (proj) openProject(proj.id); else editProject(null, { name: x.name, lead_id: x.id, description: x.request }); });
+    $('#lProj', root).addEventListener('click', () => { if (proj) { closeAll(); openProject(proj.id); } else editProject(null, { name: x.name, lead_id: x.id, description: x.request }); });
     $('#lTask', root).addEventListener('click', () => editTask(null, { title: `Звʼязатися: ${x.name}`, note: x.request, date: x.next_date || today(), time: '10:00', remind_minutes: 0, priority: 'mid' }));
     $('#lEdit', root).addEventListener('click', () => editLead(x));
-  });
+  }, { reopen: () => showLead(byId('leads', x.id)) });
 }
 
 function editLead(x, preset = {}) {
   const isNew = !x;
-  const v = x ? { ...x } : { source: 'telegram_work', status: 'new', date: today(), ...preset };
+  const v = x ? { ...x, ...preset } : { source_id: ls.get('lastSource', S.sources[0]?.id || ''), status: 'new', date: today(), ...preset };
+  if (v.source_id && !byId('sources', v.source_id)) v.source_id = S.sources[0]?.id || '';
   openForm({
     title: isNew ? 'Новий лід' : 'Редагувати ліда', values: v,
+    rebuild: (cur) => editLead(x, { ...cur, ...(newSourceId ? { source_id: newSourceId } : {}) }),
+    extraTop: '',
     fields: [
       { name: 'name', label: 'Імʼя / компанія', required: true },
-      { name: 'source', label: 'Джерело', type: 'toggle', options: Object.fromEntries(Object.entries(SOURCES).map(([k, s]) => [k, `${s.icon} ${s.label}`])) },
+      { name: 'source_id', label: 'Рекламний канал (джерело)', type: 'select', options: { '': '— не вказано —', ...Object.fromEntries(S.sources.map((s) => [s.id, `${chOf(s).icon} ${s.name}`])) }, after: '<button type="button" class="link" id="newSrc">＋ Новий канал</button>' },
       { name: 'contact', label: 'Контакт (телефон або @username)', placeholder: '+380… або @username' },
       { name: 'request', label: 'Що потрібно / запит', type: 'textarea' },
       { name: 'status', label: 'Етап', type: 'select', options: Object.fromEntries(Object.entries(LEAD_STATUS).map(([k, s]) => [k, s.label])), half: true },
@@ -1064,12 +1159,51 @@ function editLead(x, preset = {}) {
       { name: 'next_date', label: 'Наступний контакт 🔔', type: 'date', half: true },
       { name: 'note', label: 'Нотатки', type: 'textarea' }
     ],
+    mount: (root) => { newSourceId = null; $('#newSrc', root).addEventListener('click', () => editSource()); },
     onSave: async (d) => {
       if (d.next_date) ensurePushAsked();
+      d.source_id = d.source_id ? Number(d.source_id) : null;
+      if (d.source_id) ls.set('lastSource', d.source_id);
       if (isNew) await create('leads', d); else await update('leads', x, d);
       toast('Збережено');
     },
     onDelete: isNew ? null : () => remove('leads', x)
+  });
+}
+
+/* ---------- Рекламні канали ---------- */
+let newSourceId = null;
+function manageSources() {
+  openSheet(`<h2>📣 Рекламні канали</h2>
+    <p class="hint" style="margin-top:0">Канали — це джерела, з яких приходять ліди. Додайте рекламу в Instagram, Facebook, сайт, OLX, рекомендації тощо.</p>
+    <div class="list">${S.sources.length ? S.sources.map((s) => {
+      const n = S.leads.filter((l) => l.source_id === s.id).length;
+      return `<div class="item click" data-src="${s.id}"><div class="ico" style="background:color-mix(in srgb, ${chOf(s).color} 15%, transparent)">${chOf(s).icon}</div><div class="grow"><div class="t">${esc(s.name)}</div><div class="s">${chOf(s).label} · лідів: ${n}</div></div><span class="muted">›</span></div>`;
+    }).join('') : '<div class="empty" style="padding:20px">Каналів ще немає</div>'}</div>
+    <button class="btn" id="srcNew">＋ Додати канал</button>`, (root) => {
+    $$('[data-src]', root).forEach((el) => el.addEventListener('click', () => editSource(byId('sources', el.dataset.src))));
+    $('#srcNew', root).addEventListener('click', () => editSource());
+  }, { reopen: manageSources });
+}
+
+function editSource(src) {
+  const isNew = !src;
+  openForm({
+    title: isNew ? 'Новий рекламний канал' : 'Редагувати канал', values: src ? { ...src } : { channel: 'instagram' },
+    fields: [
+      { name: 'name', label: 'Назва каналу', required: true, placeholder: 'Напр.: Реклама Instagram, Сайт, OLX' },
+      { name: 'channel', label: 'Тип', type: 'select', options: Object.fromEntries(Object.entries(CHANNELS).map(([k, c]) => [k, `${c.icon} ${c.label}`])) }
+    ],
+    onSave: async (d) => {
+      if (isNew) { const it = await create('sources', { ...d, position: S.sources.length + 1 }); S.sources.push(S.sources.shift()); newSourceId = it.id; S.sources.sort((a, b) => a.position - b.position || a.id - b.id); render(); }
+      else await update('sources', src, d);
+      toast('Канал збережено');
+    },
+    onDelete: isNew ? null : async () => {
+      const n = S.leads.filter((l) => l.source_id === src.id).length;
+      if (n && !confirm(`Канал використовують ${n} лід(ів) — вони залишаться без джерела. Продовжити?`)) throw new Error('cancel');
+      await remove('sources', src, { reload: true });
+    }
   });
 }
 
@@ -1080,6 +1214,7 @@ function fab() {
   if (ui.tab === 'projects') return ui.projectId ? editTask(null, { project_id: ui.projectId, date: '' }) : editProject();
   if (ui.tab === 'leads') return editLead();
   const opts = [
+    ['voice', '🎤', 'Справа голосом', () => voiceTask()],
     ['task', '✅', 'Справа', () => editTask(null, { date: today() })],
     ['list', '☰', 'Справи списком', () => bulkTasks({ date: today() })],
     ['exp', '⬆️', 'Витрата', () => editTx()],
@@ -1090,7 +1225,7 @@ function fab() {
     ['set', '📦', 'Рахунок постачальника', () => editSettlement()]
   ];
   openSheet(`<h2>Додати</h2><div class="grid2">${opts.map(([k, i, l]) => `<button class="kpi click" data-add="${k}" style="border:0;text-align:left;display:flex;gap:10px;align-items:center"><span class="ico" style="width:38px;height:38px">${i}</span><b style="font-size:14px">${l}</b></button>`).join('')}</div>`, (root) => {
-    $$('[data-add]', root).forEach((b) => b.addEventListener('click', () => opts.find((o) => o[0] === b.dataset.add)[3]()));
+    $$('[data-add]', root).forEach((b) => b.addEventListener('click', () => { closeAll(); opts.find((o) => o[0] === b.dataset.add)[3](); }));
   });
 }
 
@@ -1196,6 +1331,107 @@ setInterval(async () => {
   });
 }, 30000);
 
+/* ================= Голосове введення ================= */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let activeRec = null;
+/** Надиктувати текст у поле (українська). append — дописати новим рядком. */
+function dictate(input, btn, { append = false, onFinal } = {}) {
+  if (activeRec) { activeRec.stop(); return; }
+  if (!SR) {
+    input.focus();
+    toast('Голос: натисніть 🎤 на клавіатурі телефону й говоріть');
+    return;
+  }
+  const r = new SR();
+  r.lang = 'uk-UA'; r.interimResults = true; r.continuous = false; r.maxAlternatives = 1;
+  const before = append && input.value.trim() ? input.value.replace(/\s+$/, '') + '\n' : '';
+  let text = '';
+  activeRec = r;
+  btn?.classList.add('rec');
+  navigator.vibrate?.(15);
+  r.onresult = (e) => {
+    text = [...e.results].map((x) => x[0].transcript).join(' ').trim();
+    input.value = before + text;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  r.onerror = (e) => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') toast('Дозвольте доступ до мікрофона в налаштуваннях браузера');
+    else if (e.error === 'no-speech') toast('Не почув — спробуйте ще раз');
+    else if (e.error !== 'aborted') toast('Розпізнавання недоступне. Скористайтеся 🎤 на клавіатурі');
+  };
+  r.onend = () => {
+    activeRec = null;
+    btn?.classList.remove('rec');
+    if (text) { text = text.charAt(0).toUpperCase() + text.slice(1); input.value = before + text; onFinal?.(text); }
+  };
+  try { r.start(); } catch { activeRec = null; btn?.classList.remove('rec'); input.focus(); }
+}
+
+const WEEKDAYS = [['неділ', 0], ['понеділ', 1], ['вівтор', 2], ['серед', 3], ['четвер', 4], ['пʼятниц', 5], ["п'ятниц", 5], ['пятниц', 5], ['субот', 6]];
+/**
+ * Розбір фрази: «завтра о 15:30 подзвонити постачальнику» → дата, час, нагадування.
+ * Якщо названо час — нагадування ставиться на цей час.
+ */
+function parseTaskText(raw, baseDate) {
+  let t = ' ' + String(raw || '').replace(/[’`]/g, 'ʼ').trim() + ' ';
+  let date = null; let time = null; let remind = null;
+  const cut = (re) => { const m = t.match(re); if (m) t = t.replace(m[0], ' '); return m; };
+  if (cut(/\s(?:нагадай|нагадати|нагадування)(?:\s+мені)?[,]?\s/i)) remind = 0;
+  if (cut(/\sпіслязавтра[,]?\s/i)) date = addDays(today(), 2);
+  else if (cut(/\sзавтра[,]?\s/i)) date = addDays(today(), 1);
+  else if (cut(/\sсьогодні[,]?\s/i)) date = today();
+  else {
+    const m = cut(/\s(?:в|у|во)?\s?(понеділ\S*|вівтор\S*|серед\S*|четвер\S*|пʼ?ятниц\S*|п'ятниц\S*|субот\S*|неділ\S*)[,]?\s/i);
+    if (m) {
+      const w = m[1].toLowerCase(); const wd = WEEKDAYS.find(([k]) => w.startsWith(k))?.[1];
+      if (wd !== undefined) { let d = new Date(); let n = (wd - d.getDay() + 7) % 7; if (n === 0) n = 7; date = addDays(today(), n); }
+    }
+  }
+  const tm = cut(/\s(?:о|об)\s+(\d{1,2})(?:(?:[:.]|\s)(\d{2}))?(?:\s*год\S*)?[,]?\s/i) || cut(/\s(?:в|у)\s+(\d{1,2})[:.](\d{2})[,]?\s/i) || cut(/\s(\d{1,2})[:.](\d{2})[,]?\s/);
+  if (tm) { const h = +tm[1]; const mi = +(tm[2] || 0); if (h < 24 && mi < 60) time = `${pad(h)}:${pad(mi)}`; }
+  let title = t.replace(/\s+/g, ' ').trim().replace(/^[,.;:\s-]+|[,.;:\s-]+$/g, '');
+  title = title.charAt(0).toUpperCase() + title.slice(1);
+  if ((time || remind !== null) && !date) date = baseDate || today();
+  if (time && remind === null) remind = 0;
+  return { title, date, time, remind_minutes: remind };
+}
+
+function voiceTask(preset = {}) {
+  const projOpts = projOptions();
+  openSheet(`<h2>🎤 Справа голосом</h2>
+    <div class="voice-box"><button class="voice-big" id="vBig" aria-label="Говорити">🎤</button>
+      <div class="small muted">Натисніть і скажіть, наприклад:<br><b>«Завтра о 10 подзвонити постачальнику»</b></div></div>
+    <div class="f"><label>Розпізнаний текст</label><textarea id="vText" placeholder="Тут зʼявиться текст — його можна виправити"></textarea></div>
+    <div class="parsed" id="vParsed"></div>
+    <div class="f"><label>Проєкт</label><select id="vProj">${Object.entries(projOpts).map(([k, l]) => `<option value="${esc(k)}" ${String(k) === String(preset.project_id || '') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+    <button class="btn" id="vSave">Зберегти справу</button>`, (root) => {
+    const ta = $('#vText', root); const big = $('#vBig', root);
+    const preview = () => {
+      const p = parseTaskText(ta.value);
+      $('#vParsed', root).innerHTML = ta.value.trim() ? [
+        `<span class="pill">✅ ${esc(p.title || '—')}</span>`,
+        p.date ? `<span class="pill gray">📅 ${fDate(p.date)}</span>` : '<span class="pill gray">без дати</span>',
+        p.time ? `<span class="pill gray">🕒 ${p.time}</span>` : '',
+        p.remind_minutes !== null ? '<span class="pill blue">🔔 нагадаю</span>' : ''
+      ].join('') : '';
+    };
+    ta.addEventListener('input', preview);
+    big.addEventListener('click', () => dictate(ta, big, { onFinal: preview }));
+    $('#vSave', root).addEventListener('click', async () => {
+      const raw = ta.value.trim(); if (!raw) { toast('Скажіть або впишіть справу'); return; }
+      const p = parseTaskText(raw);
+      const data = { title: p.title || raw, priority: 'low', project_id: $('#vProj', root).value ? Number($('#vProj', root).value) : null };
+      if (p.date) data.date = p.date;
+      if (p.time) data.time = p.time;
+      if (p.remind_minutes !== null) { data.remind_minutes = p.remind_minutes; ensurePushAsked(); }
+      await create('tasks', data);
+      toast(`Справу додано${p.date ? ' на ' + fDate(p.date) : ''}${p.time ? ' о ' + p.time : ''}`);
+      back();
+    });
+    setTimeout(() => big.click(), 150);
+  });
+}
+
 /* ================= Налаштування ================= */
 async function openSettings() {
   const st = await pushStatus().catch(() => 'unsupported');
@@ -1225,8 +1461,8 @@ async function openSettings() {
     <div class="btns"><a class="btn ghost" href="/api/export">⬇️ Резервна копія (JSON)</a><button class="btn danger" id="logout">Вийти</button></div>
     <p class="hint" style="text-align:center">Mini CRM 2.0 · дані зберігаються на вашому сервері</p>
   `, (root) => {
-    $('#pOn', root)?.addEventListener('click', async () => { if (await enablePush()) openSettings(); });
-    $('#pOff', root)?.addEventListener('click', async () => { await disablePush(); openSettings(); });
+    $('#pOn', root)?.addEventListener('click', async () => { if (await enablePush()) refreshTop(); });
+    $('#pOff', root)?.addEventListener('click', async () => { await disablePush(); refreshTop(); });
     $('#pTest', root)?.addEventListener('click', async () => { const r = await api('POST', '/api/push/test'); toast(r.sent ? `Надіслано на пристроїв: ${r.sent}` : 'Немає підписаних пристроїв'); });
     $('#snd', root).addEventListener('change', (e) => { ls.set('sound', e.target.value); playSound(e.target.value); });
     $('#sndPlay', root).addEventListener('click', () => playSound($('#snd', root).value));
@@ -1239,7 +1475,7 @@ async function openSettings() {
       await fetch('/logout', { method: 'POST', headers: { 'X-CSRF-TOKEN': CSRF }, credentials: 'same-origin' });
       location.href = '/login';
     });
-  });
+  }, { reopen: openSettings });
 }
 
 function applyTheme() {
@@ -1259,11 +1495,16 @@ function openUrl(url) {
 $$('#tabbar button').forEach((b) => b.addEventListener('click', () => go(b.dataset.tab)));
 $('#settingsBtn').addEventListener('click', openSettings);
 $('#fab').addEventListener('click', fab);
-$('#backBtn').addEventListener('click', () => history.back());
-window.addEventListener('popstate', () => { if (sheetClose) { closeSheet(); return; } if (ui.projectId) { ui.projectId = null; render(); } });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
+$('#backBtn').addEventListener('click', () => { ui.projectId = null; render(); window.scrollTo(0, 0); });
+// Системна кнопка «Назад» (Android, жест у браузері): спершу закриває вікна по одному, потім проєкт
+window.addEventListener('popstate', () => {
+  if (stack.length) { back(); if (stack.length) history.pushState({ sheet: true }, ''); return; }
+  if (ui.projectId) { ui.projectId = null; render(); }
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') back(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh().catch(() => {}); });
 applyTheme();
+['gesturestart', 'gesturechange'].forEach((ev) => document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
 
 refresh().then(() => {
   if (location.search) { openUrl(location.href); history.replaceState(null, '', '/'); }

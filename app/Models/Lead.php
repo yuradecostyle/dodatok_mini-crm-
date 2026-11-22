@@ -6,7 +6,6 @@ use Illuminate\Database\Eloquent\Model;
 
 class Lead extends Model
 {
-    public const SOURCES = ['viber_personal', 'viber_work', 'telegram_personal', 'telegram_work'];
     public const STATUSES = ['new', 'work', 'offer', 'won', 'lost'];
 
     protected $guarded = ['id', 'created_at', 'updated_at', 'notified_on'];
@@ -15,7 +14,7 @@ class Lead extends Model
 
     protected function casts(): array
     {
-        return ['amount' => 'float', 'date' => 'date:Y-m-d', 'next_date' => 'date:Y-m-d'];
+        return ['source_id' => 'integer', 'amount' => 'float', 'date' => 'date:Y-m-d', 'next_date' => 'date:Y-m-d'];
     }
 
     protected static function booted(): void
